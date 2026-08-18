@@ -1,0 +1,42 @@
+appId: com.example.scaffold
+# productName 统一在 package.json 里定义，Electron 的 app.getName() 也读同一个字段
+
+directories:
+  # 打包输入（图标等）目录，electron-builder 不会把它打进 App 内部
+  buildResources: resources
+  output: dist
+
+# 显式白名单。默认规则会把整个项目目录（含 src/ 源码）打进 asar，
+# 这里只保留构建产物与 package.json，包更小也不会泄露源码。
+files:
+  - out/**/*
+  - package.json
+
+# 需要随包分发的静态资源（词典、模板、二进制等）放这里，运行时用 process.resourcesPath 访问
+# extraResources:
+#   - from: assets
+#     to: assets
+
+mac:
+  category: public.app-category.utilities
+  target:
+    - dmg
+  icon: resources/icon.icns
+  # ↓↓↓ 签名与公证：分发给他人前必须配置，本地自用可保持注释 ↓↓↓
+  # 1. 签名身份，取自钥匙串（`security find-identity -v -p codesigning` 可列出）
+  # identity: "Developer ID Application: Your Name (TEAMID)"
+  # 2. 公证要求开启 Hardened Runtime，并声明所需的 entitlements
+  # hardenedRuntime: true
+  # entitlements: resources/entitlements.mac.plist
+  # entitlementsInherit: resources/entitlements.mac.plist
+  # 3. 公证凭据通过环境变量传入：APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+  # notarize: true
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
