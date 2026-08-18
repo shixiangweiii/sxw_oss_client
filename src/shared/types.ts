@@ -43,7 +43,11 @@ export type MenuAction = 'file:open' | 'file:save' | 'file:save-as' | 'view:togg
 
 /** 持久化到 userData/settings.json 的内容 */
 export interface AppSettings {
-  /** null 表示用户从未手动切换过，此时跟随系统外观 */
+  /**
+   * null 表示用户从未手动切换过，此时跟随系统外观。
+   * 只有 settings:set-theme 会写这个字段——即只有用户显式切换才落盘，
+   * 否则首次启动解析出的系统外观会被记成"用户选择"，"跟随系统"就永久失效了。
+   */
   theme: Theme | null
   windowBounds: { width: number; height: number } | null
 }
@@ -60,6 +64,8 @@ export interface ElectronAPI {
   saveFileAs: (content: string, filters?: FileFilter[]) => Promise<SaveResult | null>
   newWindow: (config?: WindowConfig) => Promise<void>
   reportWindowState: (state: WindowState) => Promise<void>
+  /** 仅在用户显式切换外观时调用，用于持久化偏好 */
+  setThemePreference: (theme: Theme) => Promise<void>
   getInitConfig: () => Promise<InitConfig>
   /** 返回取消订阅函数 */
   onMenuAction: (callback: (action: MenuAction) => void) => () => void

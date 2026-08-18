@@ -8,11 +8,17 @@ interface ToolbarProps {
   onSave: () => void
   onSaveAs: () => void
   onClear: () => void
+  onToggleTheme: () => void
 }
 
-export function Toolbar({ onOpen, onSave, onSaveAs, onClear }: ToolbarProps): JSX.Element {
+export function Toolbar({
+  onOpen,
+  onSave,
+  onSaveAs,
+  onClear,
+  onToggleTheme
+}: ToolbarProps): JSX.Element {
   const theme = useStore((s) => s.theme)
-  const toggleTheme = useStore((s) => s.toggleTheme)
   const windowNumber = useStore((s) => s.windowNumber)
   const filePath = useStore((s) => s.filePath)
 
@@ -58,7 +64,7 @@ export function Toolbar({ onOpen, onSave, onSaveAs, onClear }: ToolbarProps): JS
         <IconButton
           icon={theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
           label={theme === 'dark' ? '切换为浅色外观' : '切换为深色外观'}
-          onClick={toggleTheme}
+          onClick={onToggleTheme}
         />
       </div>
     </div>

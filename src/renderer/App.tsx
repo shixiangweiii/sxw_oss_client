@@ -7,6 +7,16 @@ import { fileName } from '../shared/path'
 /** 只读预览的字符上限：打开超大文件时不把整段塞进 DOM */
 const PREVIEW_LIMIT = 20_000
 
+/**
+ * Electron 会把主进程抛出的错误包装成
+ * "Error invoking remote method 'file:open': Error: EACCES ..."，
+ * 直接展示噪音太大，这里剥掉两层前缀只留真实原因。
+ */
+function describeError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  return raw.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^Error:\s*/, '')
+}
+
 function Toast(): JSX.Element | null {
   const message = useStore((s) => s.toastMessage)
   const type = useStore((s) => s.toastType)
@@ -22,8 +32,10 @@ function Toast(): JSX.Element | null {
 
   return (
     <div
+      role="status"
+      aria-live="polite"
       className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm text-white shadow-lg ${
-        type === 'success' ? 'bg-green-500' : 'bg-red-500'
+        type === 'error' ? 'bg-red-500' : 'bg-green-500'
       }`}
     >
       {message}
@@ -33,6 +45,7 @@ function Toast(): JSX.Element | null {
 
 function App(): JSX.Element {
   const theme = useStore((s) => s.theme)
+  const isInitialized = useStore((s) => s.isInitialized)
   const filePath = useStore((s) => s.filePath)
   const content = useStore((s) => s.content)
 
@@ -47,39 +60,66 @@ function App(): JSX.Element {
       const store = useStore.getState()
       store.setWindowNumber(init.windowNumber)
       store.setTheme(init.config.theme)
+      store.markInitialized()
     })
   }, [])
 
-  // 窗口标题由主进程统一组装（含重名消歧），渲染层只上报自己的状态
+  // 窗口标题由主进程统一组装（含重名消歧），渲染层只上报自己的状态。
+  //
+  // isInitialized 门控是必须的：effect 在挂载时就会跑，而此时 store 里还是占位主题，
+  // 抢在 getInitConfig 返回之前上报的话，主进程侧的 entry.config 会被占位值覆写；
+  // dev 的 StrictMode 下 effect 双跑，第二次 getInitConfig 还会把这个被污染的值当成
+  // fallback 读回来，最终导致首窗主题解析错误。
   useEffect(() => {
+    if (!isInitialized) return
     window.electronAPI?.reportWindowState({ filePath, config: { theme } })
-  }, [filePath, theme])
+  }, [isInitialized, filePath, theme])
 
   const handleOpen = useCallback(async () => {
-    const result = await window.electronAPI?.openFile()
-    if (!result) return
-    useStore.getState().setFile(result.path, result.content)
+    try {
+      const result = await window.electronAPI?.openFile()
+      if (!result) return
+      useStore.getState().setFile(result.path, result.content)
+    } catch (error) {
+      useStore.getState().showToast(`打开失败：${describeError(error)}`, 'error')
+    }
   }, [])
 
   // 有路径直接覆盖写入，没有则弹「另存为」——由主进程判断，渲染层不关心
   const handleSave = useCallback(async () => {
     const store = useStore.getState()
-    const saved = await window.electronAPI?.saveFile(store.content, store.filePath)
-    if (!saved) return
-    store.setFilePath(saved.path)
-    store.showToast(`已保存 ${fileName(saved.path)}`, 'success')
+    try {
+      const saved = await window.electronAPI?.saveFile(store.content, store.filePath)
+      if (!saved) return
+      store.setFilePath(saved.path)
+      store.showToast(`已保存 ${fileName(saved.path)}`, 'success')
+    } catch (error) {
+      store.showToast(`保存失败：${describeError(error)}`, 'error')
+    }
   }, [])
 
   const handleSaveAs = useCallback(async () => {
     const store = useStore.getState()
-    const saved = await window.electronAPI?.saveFileAs(store.content)
-    if (!saved) return
-    store.setFilePath(saved.path)
-    store.showToast(`已另存为 ${fileName(saved.path)}`, 'success')
+    try {
+      const saved = await window.electronAPI?.saveFileAs(store.content)
+      if (!saved) return
+      store.setFilePath(saved.path)
+      store.showToast(`已另存为 ${fileName(saved.path)}`, 'success')
+    } catch (error) {
+      store.showToast(`另存为失败：${describeError(error)}`, 'error')
+    }
   }, [])
 
   const handleClear = useCallback(() => {
     useStore.getState().clearFile()
+  }, [])
+
+  // 切换外观的唯一入口：改 store 的同时把偏好落盘。
+  // 只有走到这里才算「用户显式选择」，settings.json 里 theme 为 null 时的「跟随系统」才成立。
+  const handleToggleTheme = useCallback(() => {
+    const next = useStore.getState().theme === 'dark' ? 'light' : 'dark'
+    useStore.getState().setTheme(next)
+    window.electronAPI?.setThemePreference(next)
   }, [])
 
   // 菜单项与工具栏按钮共用同一批 handler
@@ -87,7 +127,7 @@ function App(): JSX.Element {
     'file:open': handleOpen,
     'file:save': handleSave,
     'file:save-as': handleSaveAs,
-    'view:toggle-theme': useStore.getState().toggleTheme
+    'view:toggle-theme': handleToggleTheme
   })
 
   return (
@@ -97,6 +137,7 @@ function App(): JSX.Element {
         onSave={handleSave}
         onSaveAs={handleSaveAs}
         onClear={handleClear}
+        onToggleTheme={handleToggleTheme}
       />
 
       <main className="flex-1 overflow-auto p-8">

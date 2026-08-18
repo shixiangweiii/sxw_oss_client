@@ -14,15 +14,17 @@ npm run dev
 
 ## 脚本
 
-| 命令                              | 作用                                         |
-| --------------------------------- | -------------------------------------------- |
-| `npm run dev`                     | 启动开发服务器，主进程与渲染进程都支持热更新 |
-| `npm run typecheck`               | 分别按 node / web 两套 tsconfig 做类型检查   |
-| `npm run build`                   | 先 typecheck，再构建三个进程的产物到 `out/`  |
-| `npm run lint` / `lint:fix`       | ESLint 检查 / 自动修复                       |
-| `npm run format` / `format:check` | Prettier 格式化 / 校验                       |
-| `npm run package`                 | 构建并打出 macOS dmg 到 `dist/`              |
-| `npm run make-icon`               | 重新生成 `resources/icon.png` 与 `icon.icns` |
+| 命令                              | 作用                                                   |
+| --------------------------------- | ------------------------------------------------------ |
+| `npm run dev`                     | 启动开发服务器，主进程与渲染进程都支持热更新           |
+| `npm run typecheck`               | 分别按 node / web 两套 tsconfig 做类型检查             |
+| `npm run build`                   | 先 typecheck，再构建三个进程的产物到 `out/`            |
+| `npm run preview`                 | 用构建产物启动应用（不带热更新，接近打包后的运行方式） |
+| `npm run lint` / `lint:fix`       | ESLint 检查 / 自动修复                                 |
+| `npm run format` / `format:check` | Prettier 格式化 / 校验                                 |
+| `npm run package`                 | 构建并打出 macOS dmg 到 `dist/`                        |
+| `npm run make-icon`               | 重新生成 `resources/icon.png` 与 `icon.icns`           |
+| `node scripts/init.mjs`           | 交互式改名（应用名 / 包名 / appId / 作者），可反复执行 |
 
 ## 目录结构
 
@@ -56,15 +58,22 @@ src/
 - **主题**：深浅色切换，优先级为「用户持久化选择 > 系统外观」
 - **窗口尺寸记忆**：resize 防抖后写入 settings，新窗口相对当前窗口错开 24px
 - **CSP**：生产构建时注入严格策略（见 `electron.vite.config.ts`），dev 不注入以免拦掉热更新
+- **渲染进程沙箱**：`sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`，
+  preload 只用 `ipcRenderer` / `contextBridge`，不依赖任何 Node 内建
+- **外链白名单**：只有 `http` / `https` / `mailto` 会交给系统浏览器，其余 scheme 直接丢弃
 
 ## 怎么新增一个 IPC 通道
 
-四步，全都有类型约束，漏一步 TS 就会报错：
+四步：
 
 1. **登记通道名** — `src/shared/constants.ts` 的 `IPC_CHANNELS` 加一个成员
 2. **定义类型** — `src/shared/types.ts` 里补参数/返回值类型，并在 `ElectronAPI` 接口上加方法签名
 3. **主进程实现** — `src/main/ipc.ts` 里 `ipcMain.handle(IPC_CHANNELS.XXX, ...)`
 4. **preload 暴露** — `src/preload/index.ts` 的 `electronAPI` 对象加对应实现
+
+第 2、4 步漏了 TS 会直接报错（`ElectronAPI` 接口双向约束 preload 实现与渲染层调用）。
+但**第 3 步没有类型兜底**：通道常量与 `ipcMain.handle` 之间没有类型关联，忘记注册 handler
+要到运行时调用才会失败（报 `No handler registered for '<通道名>'`），记得跑一次验证。
 
 渲染层通过 `window.electronAPI?.xxx()` 调用，类型自动来自 `ElectronAPI`。
 
@@ -105,9 +114,14 @@ npm run make-icon -- --keep-png
 
 ## 依赖版本
 
-刻意锁在与验证过的组合一致的大版本上：Electron 33、React 18、Tailwind 3、Zustand 5、
-electron-vite 2、electron-builder 25。升级大版本前建议先确认 Tailwind 4 的 CSS-first 配置
-和 React 19 对第三方库的影响。
+版本策略分两类，**不要一刀切**：
+
+- **Electron 必须跟随官方维护窗口。** 官方只维护最近三个大版本，落在窗口外意味着累积的
+  Chromium 安全修复不会再回灌。脚手架当前用 Electron 43（Chromium 150 / Node 24）。
+  开新项目前请确认它仍在维护窗口内，否则先升级——本仓库只用 `BrowserWindow` / `dialog` /
+  `Menu` / `nativeTheme` / `screen` / `shell` 这些稳定 API，跨大版本升级通常改动很小。
+- **React / Tailwind / Zustand / TypeScript 可以锁定。** 它们不承担安全补丁职责，锁在
+  React 18 + Tailwind 3 是为了避免 Tailwind 4 的 CSS-first 配置改写和 React 19 的生态兼容验证。
 
 `.npmrc` 的策略是：**依赖解析走 npm 官方源**（lockfile 里的 `resolved` 因此通用），
 **只有 Electron 二进制和 electron-builder 工具链走 npmmirror 公网 CDN**（避免从 GitHub 拉取超时）。
@@ -143,5 +157,9 @@ electron-vite 2、electron-builder 25。升级大版本前建议先确认 Tailwi
 主干按 macOS 优先做的：`titleBarStyle: 'hiddenInset'`、`trafficLightPosition`、
 Cmd 系快捷键、`window-all-closed` 不退出、只打 dmg。
 
-要支持 Windows / Linux：在 `electron-builder.yml` 增加 `win` / `linux` 段，
-并在 `window.ts` 里按 `process.platform` 分支处理标题栏样式。
+要支持 Windows / Linux：
+
+- 在 `electron-builder.yml` 增加 `win` / `linux` 段
+- 在 `window.ts` 里按 `process.platform` 分支处理标题栏样式
+- `src/shared/path.ts` 的 `fileName` 只按 `/` 切分，Windows 路径需要改成同时处理 `\`
+  （或在主进程侧改用 Node 的 `basename`，但要保证渲染层拿到同样的结果）

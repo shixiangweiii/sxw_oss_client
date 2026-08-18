@@ -12,7 +12,9 @@ interface WindowEntry {
 }
 
 const windows = new Map<number, WindowEntry>()
-let onChangeCallback: (() => void) | null = null
+// 用 Set 而不是单个变量：业务扩展时（托盘、状态栏……）可能有多个模块要感知窗口集合变化，
+// 单槽位会让第二个订阅者静默顶掉第一个
+const changeListeners = new Set<() => void>()
 let nextWindowNumber = 1
 /** 记录最近一次获得焦点的窗口，供「新窗口继承配置」在无聚焦窗口时回退 */
 let lastFocusedId: number | null = null
@@ -36,6 +38,10 @@ function composeTitle(entry: WindowEntry): string {
  * 重名消歧需要全局视角：任一窗口的文件名变化、或窗口开关，都可能改变别的窗口该不该带编号，
  * 所以只要有变动就重算所有窗口的标题。
  */
+function notifyChange(): void {
+  for (const listener of changeListeners) listener()
+}
+
 function recomputeAllTitles(): void {
   for (const entry of windows.values()) {
     if (entry.win.isDestroyed()) continue
@@ -44,7 +50,7 @@ function recomputeAllTitles(): void {
     entry.title = next
     entry.win.setTitle(next)
   }
-  onChangeCallback?.()
+  notifyChange()
 }
 
 export function registerWindow(win: BrowserWindow, config: WindowConfig): void {
@@ -66,7 +72,7 @@ export function registerWindow(win: BrowserWindow, config: WindowConfig): void {
   win.on('focus', () => {
     lastFocusedId = id
     // 「窗口」菜单里的单选标记要跟着焦点走
-    onChangeCallback?.()
+    notifyChange()
   })
 
   recomputeAllTitles()
@@ -77,6 +83,10 @@ export function setWindowFilePath(winId: number, filePath: string | null): void 
   if (!entry || entry.win.isDestroyed()) return
   // 早退：路径没变就不触发全窗口标题重算与菜单重建。
   // 渲染进程在主题切换时也会上报状态，没有这道判断会白跑一轮。
+  //
+  // 注意：这道早退的前提是 composeTitle 只依赖 filePath 和 number。
+  // 将来若让 config 里的字段（模式、缩放……）参与标题组装，必须同步放宽这里的比较条件，
+  // 否则「只改 config 不改文件」的场景标题不会重算。
   if (entry.filePath === filePath) return
 
   entry.filePath = filePath
@@ -130,6 +140,10 @@ export function getWindowNumber(winId: number): number {
   return windows.get(winId)?.number ?? 1
 }
 
-export function onWindowsChange(cb: () => void): void {
-  onChangeCallback = cb
+/** 订阅窗口集合 / 焦点变化，返回取消订阅函数 */
+export function onWindowsChange(cb: () => void): () => void {
+  changeListeners.add(cb)
+  return () => {
+    changeListeners.delete(cb)
+  }
 }

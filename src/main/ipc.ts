@@ -15,6 +15,7 @@ import type {
   FileResult,
   InitConfig,
   SaveResult,
+  Theme,
   WindowConfig,
   WindowState
 } from '../shared/types'
@@ -24,23 +25,44 @@ const DEFAULT_FILTERS: FileFilter[] = [
   { name: '所有文件', extensions: ['*'] }
 ]
 
-async function showSaveDialog(
+/**
+ * fromWebContents 在窗口销毁的竞态下可能返回 null。
+ * Electron 对空父窗口是容错的（退化成非模态对话框），但这里显式分支处理，
+ * 避免用 `win!` 在类型上撒谎。
+ */
+function openDialog(
+  win: BrowserWindow | null,
+  options: Electron.OpenDialogOptions
+): Promise<Electron.OpenDialogReturnValue> {
+  return win ? dialog.showOpenDialog(win, options) : dialog.showOpenDialog(options)
+}
+
+function saveDialog(
+  win: BrowserWindow | null,
+  options: Electron.SaveDialogOptions
+): Promise<Electron.SaveDialogReturnValue> {
+  return win ? dialog.showSaveDialog(win, options) : dialog.showSaveDialog(options)
+}
+
+async function promptAndWrite(
   win: BrowserWindow | null,
   content: string,
   filters?: FileFilter[]
 ): Promise<SaveResult | null> {
-  const result = await dialog.showSaveDialog(win!, { filters: filters ?? DEFAULT_FILTERS })
+  const result = await saveDialog(win, { filters: filters ?? DEFAULT_FILTERS })
   if (result.canceled || !result.filePath) return null
   await writeFile(result.filePath, content, 'utf-8')
   return { path: result.filePath }
 }
 
 export function registerIpcHandlers(): void {
+  // 说明：以下 handler 里的 readFile / writeFile 失败时会让 invoke 的 promise reject，
+  // 由渲染层统一 try/catch 并弹出错误 toast（见 renderer/App.tsx）。
   ipcMain.handle(
     IPC_CHANNELS.FILE_OPEN,
     async (event, filters?: FileFilter[]): Promise<FileResult | null> => {
       const win = BrowserWindow.fromWebContents(event.sender)
-      const result = await dialog.showOpenDialog(win!, {
+      const result = await openDialog(win, {
         filters: filters ?? DEFAULT_FILTERS,
         properties: ['openFile']
       })
@@ -63,14 +85,14 @@ export function registerIpcHandlers(): void {
         await writeFile(filePath, content, 'utf-8')
         return { path: filePath }
       }
-      return showSaveDialog(BrowserWindow.fromWebContents(event.sender), content, filters)
+      return promptAndWrite(BrowserWindow.fromWebContents(event.sender), content, filters)
     }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.FILE_SAVE_AS,
     async (event, content: string, filters?: FileFilter[]): Promise<SaveResult | null> =>
-      showSaveDialog(BrowserWindow.fromWebContents(event.sender), content, filters)
+      promptAndWrite(BrowserWindow.fromWebContents(event.sender), content, filters)
   )
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_NEW, (_event, config?: WindowConfig) => {
@@ -80,12 +102,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.WINDOW_REPORT_STATE, (event, state: WindowState) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return
-    // 顺序要紧：标题组装读的是 entry.config，必须先落配置再重算标题，
-    // 否则依赖 config 的标题会比实际状态慢一拍
+    // 这条通道只做「状态同步」，不碰持久化 —— 偏好落盘走 settings:set-theme。
+    //
+    // 先落 config 再更新文件路径：当前 composeTitle 只读 filePath 与窗口编号，顺序其实无关，
+    // 但保持这个顺序，是为了将来 config 里的字段参与标题组装时不必回头改这里。
     updateWindowConfig(win.id, state.config)
     setWindowFilePath(win.id, state.filePath)
-    // 主题是用户显式选择的偏好，持久化后下次启动直接生效
-    updateSettings({ theme: state.config.theme })
+  })
+
+  // 只有用户显式切换外观才会走到这里，AppSettings.theme 的 null 语义（跟随系统）才成立
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_SET_THEME, (_event, theme: Theme) => {
+    updateSettings({ theme })
   })
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_GET_INIT_CONFIG, (event): InitConfig => {

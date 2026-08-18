@@ -4,6 +4,7 @@ import type {
   ElectronAPI,
   FileFilter,
   MenuAction,
+  Theme,
   WindowConfig,
   WindowState
 } from '../shared/types'
@@ -26,6 +27,8 @@ const electronAPI: ElectronAPI = {
 
   reportWindowState: (state: WindowState) =>
     ipcRenderer.invoke(IPC_CHANNELS.WINDOW_REPORT_STATE, state),
+
+  setThemePreference: (theme: Theme) => ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SET_THEME, theme),
 
   getInitConfig: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW_GET_INIT_CONFIG),
 
