@@ -41,6 +41,71 @@ export interface SaveResult {
 /** 菜单项投递给渲染进程的动作。新增菜单项时在这里加一个成员，TS 会提示所有该处理的地方。 */
 export type MenuAction = 'file:open' | 'file:save' | 'file:save-as' | 'view:toggle-theme'
 
+// ---------- OSS ----------
+
+export interface OssBucketSummary {
+  name: string
+  /** bucket 所在地域，如 oss-cn-hangzhou-a */
+  region: string
+  /** 创建时间（GMT 字符串） */
+  creationDate: string
+  /** Standard / IA / Archive */
+  storageClass: string
+}
+
+export interface OssObjectSummary {
+  /** 完整 object key，如 dir/sub/a.txt */
+  name: string
+  lastModified: string
+  etag: string
+  /** 字节数 */
+  size: number
+  /** Normal / Multipart / Appendable */
+  type: string
+  storageClass: string
+}
+
+export interface OssObjectListing {
+  bucket: string
+  /** 本次列出的目录前缀（不含 delimiter 的公共前缀） */
+  prefix: string
+  /** 当前层级的文件 */
+  objects: OssObjectSummary[]
+  /** 当前层级的子目录（以 / 结尾的公共前缀） */
+  prefixes: string[]
+  isTruncated: boolean
+  nextContinuationToken: string | null
+}
+
+/** OSS 错误的结构化回传。requestId 可直接提交给阿里云排查 */
+export interface OssErrorInfo {
+  message: string
+  code?: string
+  status?: number
+  requestId?: string
+}
+
+/** OSS 连接信息（当前来自主进程 .env 解析） */
+export interface OssConnectionInfo {
+  /** .env 里 oss_bucket 指定的默认 bucket，用于首屏自动进入 */
+  defaultBucket: string | null
+}
+
+/** 文本文件的在线预览/编辑内容，UTF-8 编码 */
+export interface OssTextContent {
+  key: string
+  content: string
+  /** 字节数（不是字符数） */
+  size: number
+}
+
+/**
+ * OSS 通道的统一返回形状。
+ * 刻意不用 promise reject：ipcMain 抛出的自定义字段会在序列化时丢失、只剩 message，
+ * code/requestId 这类对排障关键的信惁就没了，所以用可辨别的 Result 交 union 显式携带。
+ */
+export type OssResult<T> = { ok: true; data: T } | { ok: false; error: OssErrorInfo }
+
 /** 持久化到 userData/settings.json 的内容 */
 export interface AppSettings {
   /**
@@ -69,4 +134,20 @@ export interface ElectronAPI {
   getInitConfig: () => Promise<InitConfig>
   /** 返回取消订阅函数 */
   onMenuAction: (callback: (action: MenuAction) => void) => () => void
+  listOssBuckets: () => Promise<OssResult<OssBucketSummary[]>>
+  /** prefix 为空字符串表示 bucket 根目录；continuationToken 用于翻页 */
+  listOssObjects: (
+    bucket: string,
+    prefix: string,
+    continuationToken?: string | null
+  ) => Promise<OssResult<OssObjectListing>>
+  getOssConfig: () => Promise<OssResult<OssConnectionInfo>>
+  /** 拉取文本文件内容（UTF-8）。超过大小上限会返回错误 */
+  getOssObjectText: (bucket: string, key: string) => Promise<OssResult<OssTextContent>>
+  /** 用编辑后的内容覆盖原对象（UTF-8） */
+  putOssObjectText: (
+    bucket: string,
+    key: string,
+    content: string
+  ) => Promise<OssResult<{ key: string }>>
 }

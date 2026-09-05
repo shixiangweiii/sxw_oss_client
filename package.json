@@ -1,8 +1,8 @@
 {
-  "name": "electron-mac-scaffold",
+  "name": "sxw-oss-client",
   "version": "0.1.0",
-  "productName": "Electron Mac Scaffold",
-  "description": "macOS 桌面应用脚手架：Electron + React + TypeScript",
+  "productName": "OSS Client",
+  "description": "面向阿里云 OSS 的 macOS 桌面客户端",
   "author": "",
   "license": "MIT",
   "private": true,
@@ -22,10 +22,13 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{ts,tsx,mjs,js,json,css,md,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,mjs,js,json,css,md,yml}\"",
-    "init": "node scripts/init.mjs",
     "make-icon": "node scripts/make-icon.mjs"
   },
+  "dependencies": {
+    "ali-oss": "^6.23.0"
+  },
   "devDependencies": {
+    "@types/ali-oss": "^6.23.3",
     "@types/node": "^22.20.1",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",

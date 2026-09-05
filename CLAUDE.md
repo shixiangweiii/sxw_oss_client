@@ -1,5 +1,6 @@
-# Electron Mac Scaffold
+# OSS Client
 
+面向阿里云 OSS 的 macOS 桌面客户端，基于 electron-mac-scaffold 脚手架创建。
 本文件为 Claude Code（claude.ai/code）提供本仓库的工作指引。
 
 ## 命令

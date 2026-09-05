@@ -1,13 +1,12 @@
-# Electron Mac Scaffold
+# OSS Client
 
-面向 macOS 桌面应用的脚手架：Electron + React 18 + TypeScript + Zustand + Tailwind，
-用 electron-vite 构建。开箱带好多窗口管理、文件读写、原生菜单、主题持久化与打包配置，
-`npm run dev` 就能出窗口。
+面向阿里云 OSS 的 macOS 桌面客户端，基于 electron-mac-scaffold 脚手架创建：
+Electron + React 18 + TypeScript + Zustand + Tailwind，用 electron-vite 构建。
+脚手架自带多窗口管理、文件读写、原生菜单、主题持久化与打包配置，`npm run dev` 就能出窗口。
 
 ## 快速开始
 
 ```bash
-node scripts/init.mjs   # 交互式改名（应用名 / 包名 / appId / 作者），可跳过
 npm install
 npm run dev
 ```
@@ -24,7 +23,6 @@ npm run dev
 | `npm run format` / `format:check` | Prettier 格式化 / 校验                                 |
 | `npm run package`                 | 构建并打出 macOS dmg 到 `dist/`                        |
 | `npm run make-icon`               | 重新生成 `resources/icon.png` 与 `icon.icns`           |
-| `node scripts/init.mjs`           | 交互式改名（应用名 / 包名 / appId / 作者），可反复执行 |
 
 ## 目录结构
 
@@ -61,6 +59,22 @@ src/
 - **渲染进程沙箱**：`sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`，
   preload 只用 `ipcRenderer` / `contextBridge`，不依赖任何 Node 内建
 - **外链白名单**：只有 `http` / `https` / `mailto` 会交给系统浏览器，其余 scheme 直接丢弃
+
+## OSS 接入约定
+
+`ali-oss` 已放在 `dependencies`（主进程运行时 require，`externalizeDepsPlugin()` 会保持 external 并随包分发），
+`@types/ali-oss` 在 `devDependencies`。接入业务时遵守：
+
+- **SDK 只在主进程用**：`ali-oss` 依赖 Node 运行时，浏览器/渲染进程里跑不起来。
+  `src/main/oss.ts` 维护客户端实例（当前从项目根 `.env` 读 region / bucket / 凭据，
+  dev 专用、已进 .gitignore；后续换成凭据管理 UI + safeStorage），
+  渲染进程一律通过 IPC 调用，照「怎么新增一个 IPC 通道」四步走
+- **凭据只存主进程**：AccessKeySecret 绝不流经渲染层；`.env` 只在 dev 生效，
+  打包后的凭据落盘后续用 `safeStorage` 加密，别明文写进 settings.json
+- **文件对话框复用**：上传选文件 / 下载存文件可以直接复用现有的 `file:open` / `file:save`
+  通道与过滤器机制
+
+SDK 用法速查见 `docs/oss-sdk-notes.md`（基于官方文档 + 本地源码整理，含与桌面客户端的功能映射表）。
 
 ## 怎么新增一个 IPC 通道
 

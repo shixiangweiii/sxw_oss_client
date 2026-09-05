@@ -1,6 +1,6 @@
-# Electron Mac Scaffold
+# OSS Client
 
-macOS 桌面应用脚手架：Electron 43 + React 18 + TypeScript + Zustand + Tailwind 3，electron-vite 构建。
+面向阿里云 OSS 的 macOS 桌面客户端：Electron 43 + React 18 + TypeScript + Zustand + Tailwind 3，electron-vite 构建。基于 electron-mac-scaffold 创建，脚手架的基础设施约定仍然全部适用。
 
 ## 命令
 

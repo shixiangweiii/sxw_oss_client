@@ -10,10 +10,16 @@ import {
   getWindowNumber
 } from './windowManager'
 import { updateSettings } from './settings'
+import { listBuckets as ossListBuckets, listObjects as ossListObjects, getObjectText, putObjectText, getDefaultBucket, toOssError } from './oss'
 import type {
   FileFilter,
   FileResult,
   InitConfig,
+  OssBucketSummary,
+  OssConnectionInfo,
+  OssObjectListing,
+  OssResult,
+  OssTextContent,
   SaveResult,
   Theme,
   WindowConfig,
@@ -123,4 +129,68 @@ export function registerIpcHandlers(): void {
     const config = consumePendingConfig(win.id) ?? getWindowConfig(win.id) ?? resolveInitialConfig()
     return { windowNumber: getWindowNumber(win.id), config }
   })
+
+  // OSS 通道统一返回 OssResult：错误结构化携带 code/requestId，不走 promise reject
+  //（自定义字段跨进程序列化会丢失，只剩 message，见 shared/types.ts 的注释）
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_LIST_BUCKETS,
+    async (): Promise<OssResult<OssBucketSummary[]>> => {
+      try {
+        return { ok: true, data: await ossListBuckets() }
+      } catch (err) {
+        return { ok: false, error: toOssError(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_LIST_OBJECTS,
+    async (
+      _event,
+      bucket: string,
+      prefix: string,
+      continuationToken?: string | null
+    ): Promise<OssResult<OssObjectListing>> => {
+      try {
+        return {
+          ok: true,
+          data: await ossListObjects(bucket, prefix, continuationToken ?? null)
+        }
+      } catch (err) {
+        return { ok: false, error: toOssError(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_GET_CONFIG,
+    (): OssResult<OssConnectionInfo> => ({ ok: true, data: { defaultBucket: getDefaultBucket() } })
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_GET_OBJECT_TEXT,
+    async (_event, bucket: string, key: string): Promise<OssResult<OssTextContent>> => {
+      try {
+        return { ok: true, data: await getObjectText(bucket, key) }
+      } catch (err) {
+        return { ok: false, error: toOssError(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_PUT_OBJECT_TEXT,
+    async (
+      _event,
+      bucket: string,
+      key: string,
+      content: string
+    ): Promise<OssResult<{ key: string }>> => {
+      try {
+        return { ok: true, data: await putObjectText(bucket, key, content) }
+      } catch (err) {
+        return { ok: false, error: toOssError(err) }
+      }
+    }
+  )
 }

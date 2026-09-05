@@ -16,5 +16,10 @@ export const IPC_CHANNELS = {
    */
   SETTINGS_SET_THEME: 'settings:set-theme',
   /** 唯一的主进程 → 渲染进程通道，用 webContents.send 单向投递菜单动作 */
-  MENU_ACTION: 'menu:action'
+  MENU_ACTION: 'menu:action',
+  OSS_LIST_BUCKETS: 'oss:list-buckets',
+  OSS_LIST_OBJECTS: 'oss:list-objects',
+  OSS_GET_CONFIG: 'oss:get-config',
+  OSS_GET_OBJECT_TEXT: 'oss:get-object-text',
+  OSS_PUT_OBJECT_TEXT: 'oss:put-object-text'
 } as const

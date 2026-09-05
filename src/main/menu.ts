@@ -41,14 +41,6 @@ export function buildMenu(): void {
           click: () => createWindow(getFocusedWindowConfig() ?? undefined)
         },
         { type: 'separator' },
-        { label: '打开…', accelerator: 'CmdOrCtrl+O', click: () => dispatch('file:open') },
-        { label: '保存', accelerator: 'CmdOrCtrl+S', click: () => dispatch('file:save') },
-        {
-          label: '另存为…',
-          accelerator: 'Shift+CmdOrCtrl+S',
-          click: () => dispatch('file:save-as')
-        },
-        { type: 'separator' },
         { role: 'close', label: '关闭窗口' }
       ]
     },

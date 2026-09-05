@@ -40,7 +40,20 @@ const electronAPI: ElectronAPI = {
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.MENU_ACTION, listener)
     }
-  }
+  },
+
+  listOssBuckets: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_LIST_BUCKETS),
+
+  listOssObjects: (bucket: string, prefix: string, continuationToken?: string | null) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_LIST_OBJECTS, bucket, prefix, continuationToken),
+
+  getOssConfig: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_GET_CONFIG),
+
+  getOssObjectText: (bucket: string, key: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_GET_OBJECT_TEXT, bucket, key),
+
+  putOssObjectText: (bucket: string, key: string, content: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_PUT_OBJECT_TEXT, bucket, key, content)
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

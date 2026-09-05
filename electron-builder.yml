@@ -1,4 +1,4 @@
-appId: com.example.scaffold
+appId: com.sxw.ossclient
 # productName 统一在 package.json 里定义，Electron 的 app.getName() 也读同一个字段
 
 directories:
