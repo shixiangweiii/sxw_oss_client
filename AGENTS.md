@@ -6,7 +6,7 @@
 
 `npm run dev` / `typecheck` / `lint` / `format` / `build` / `preview` / `package`
 
-无测试框架，`typecheck + lint + build` 是静态验证；窗口行为、持久化、打包相关改动需实际启动验证。
+`npm test` 使用 Node 内置测试运行器执行状态/服务回归测试，无额外测试框架依赖。`typecheck + lint + build` 是静态验证；窗口行为、持久化、打包相关改动需实际启动验证。
 
 ## 架构要点
 

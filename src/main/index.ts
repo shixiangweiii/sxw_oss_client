@@ -2,9 +2,11 @@ import { app, BrowserWindow } from 'electron'
 import { createWindow } from './window'
 import { registerIpcHandlers } from './ipc'
 import { buildMenu } from './menu'
+import { initializeSync } from './syncRuntime'
 import { onWindowsChange } from './windowManager'
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await initializeSync()
   registerIpcHandlers()
   // 「窗口」菜单里列的是实时窗口列表，窗口增删或焦点变化都要重建菜单
   onWindowsChange(buildMenu)

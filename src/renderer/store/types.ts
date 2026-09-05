@@ -1,4 +1,10 @@
-import type { Theme } from '../../shared/types'
+import type {
+  OssObjectVersion,
+  Theme,
+  SyncDirection,
+  SyncState,
+  SyncIssue
+} from '../../shared/types'
 
 export interface UiSlice {
   theme: Theme
@@ -29,7 +35,7 @@ export interface FileSlice {
   clearFile: () => void
 }
 
-export type StoreState = UiSlice & FileSlice & OssSlice
+export type StoreState = UiSlice & FileSlice & OssSlice & SyncSlice
 
 // ---------- OSS 文件树 ----------
 
@@ -56,6 +62,9 @@ export interface OssDirState {
 
 /** 文本编辑器状态。savedContent 与 draft 的差异即脏状态 */
 export interface OssEditorState {
+  sessionId: number
+  bucket: string
+  version: OssObjectVersion | null
   /** 正在编辑的 object key */
   key: string
   /** 服务端最新内容，保存成功后更新，用于脏检测 */
@@ -66,6 +75,9 @@ export interface OssEditorState {
 }
 
 export interface OssSlice {
+  syncDirLocal: string | null
+  syncConfigError: string | null
+  refreshBucket: () => void
   /** 当前浏览的 bucket；固定来自 .env 配置，null 表示尚未就绪 */
   activeBucket: string | null
   /** 连接配置错误（如 .env 未配置 oss_bucket） */
@@ -76,7 +88,7 @@ export interface OssSlice {
   editor: OssEditorState | null
 
   /** 首屏引导：读连接配置并自动进入 .env 指定的默认 bucket */
-  bootstrap: () => Promise<void>
+  bootstrap: (reload?: boolean) => Promise<void>
   openBucket: (name: string) => void
   /** 展开已加载的目录 / 懒加载未加载目录 / 重试失败目录 */
   toggleDir: (prefix: string) => void
@@ -89,4 +101,15 @@ export interface OssSlice {
   /** 把当前草稿覆盖回 OSS，成功后同步目录条目的大小/时间 */
   saveEditor: () => Promise<void>
   closeEditor: () => void
+}
+
+export interface SyncSlice {
+  syncState: SyncState | null
+  syncIssues: SyncIssue[]
+  syncError: string | null
+  syncRequestPending: boolean
+  applySyncState: (state: SyncState) => void
+  startSync: (direction: SyncDirection) => Promise<void>
+  cancelSync: () => Promise<void>
+  loadSyncIssues: () => Promise<void>
 }

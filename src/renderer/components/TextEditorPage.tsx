@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react'
 import { ArrowLeft, Loader2, Save } from 'lucide-react'
 import { useStore } from '../store'
+import { MAX_TEXT_EDIT_BYTES, isSyncActive } from '../../shared/constants'
 import { fileName } from '../../shared/path'
 import type { OssEditorState } from '../store/types'
 
 /**
- * 全屏文本编辑页：覆盖文件列表（fixed inset-0）。
+ * 全屏文本编辑页：覆盖文件列表（absolute inset-0）。
  * 只负责渲染，内容与保存逻辑在 store/ossSlice。
  */
 export function TextEditorPage(): JSX.Element | null {
@@ -15,21 +16,28 @@ export function TextEditorPage(): JSX.Element | null {
 }
 
 function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
+  const syncBusy = useStore((s) => isSyncActive(s.syncState?.phase))
   const setEditorDraft = useStore((s) => s.setEditorDraft)
   const saveEditor = useStore((s) => s.saveEditor)
   const closeEditor = useStore((s) => s.closeEditor)
   const openTextFile = useStore((s) => s.openTextFile)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // 打开即聚焦；key 变化（切文件）时重新聚焦
+  // 读取完成后 textarea 才挂载；切换编辑会话时也重新聚焦
   useEffect(() => {
     textareaRef.current?.focus()
-  }, [editor.key])
+  }, [editor.sessionId, editor.status])
 
   const dirty = editor.draft !== editor.savedContent
+  const byteSize = new TextEncoder().encode(editor.draft).length
+  const oversized = byteSize > MAX_TEXT_EDIT_BYTES
 
   const handleClose = (): void => {
-    if (dirty && !window.confirm('有未保存的修改，确定关闭吗？')) return
+    if (editor.status === 'saving') {
+      useStore.getState().showToast('文件正在保存，请等待完成后再关闭', 'error')
+      return
+    }
+    if (dirty && !(window.electronAPI?.confirmWindowClose(false) ?? false)) return
     closeEditor()
   }
 
@@ -46,7 +54,7 @@ function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
 
   return (
     <div
-      className="fixed inset-0 z-40 flex flex-col bg-white dark:bg-gray-900"
+      className="absolute inset-0 z-40 flex flex-col bg-white dark:bg-gray-900"
       onKeyDown={handleKeyDown}
     >
       {/* 顶栏：左右 px-20 给 macOS 红绿灯留位；整条可拖拽窗口，按钮 no-drag */}
@@ -81,7 +89,7 @@ function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
         <button
           type="button"
           onClick={() => void saveEditor()}
-          disabled={!dirty || editor.status === 'saving'}
+          disabled={!dirty || editor.status !== 'loaded' || oversized || syncBusy}
           className="titlebar-no-drag flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {editor.status === 'saving' ? (
@@ -93,6 +101,31 @@ function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
         </button>
       </div>
 
+      {syncBusy && (
+        <p className="px-6 py-2 text-sm text-amber-600">
+          同步进行中，草稿会保留，任务结束后可继续保存。
+        </p>
+      )}
+      {oversized && (
+        <p role="alert" className="px-6 py-2 text-sm text-red-500">
+          当前文本超过 2 MB，缩减内容后才能保存（按 UTF-8 字节计算）。
+        </p>
+      )}
+      {editor.status === 'loaded' && editor.error && (
+        <div role="alert" className="flex items-center gap-3 px-6 py-2 text-sm text-red-500">
+          <p className="flex-1 break-all">{editor.error}</p>
+          <button
+            type="button"
+            className="shrink-0 text-blue-600 hover:underline"
+            onClick={() => {
+              if (dirty && !(window.electronAPI?.confirmWindowClose(false) ?? false)) return
+              openTextFile(editor.key)
+            }}
+          >
+            重新读取
+          </button>
+        </div>
+      )}
       {/* 内容区 */}
       {editor.status === 'loading' ? (
         <div className="flex flex-1 items-center justify-center gap-2 text-sm text-gray-400">

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { createUiSlice } from './uiSlice'
 import { createFileSlice } from './fileSlice'
+import { createSyncSlice } from './syncSlice'
 import { createOssSlice } from './ossSlice'
 import type { StoreState } from './types'
 
@@ -15,7 +16,8 @@ export const useStore = create<StoreState>()(
   subscribeWithSelector((...a) => ({
     ...createUiSlice(...a),
     ...createFileSlice(...a),
-    ...createOssSlice(...a)
+    ...createOssSlice(...a),
+    ...createSyncSlice(...a)
   }))
 )
 

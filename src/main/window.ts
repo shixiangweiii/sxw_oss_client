@@ -90,13 +90,13 @@ export function createWindow(config?: WindowConfig): BrowserWindow {
   pendingConfigs.set(win.id, finalConfig)
   registerWindow(win, finalConfig)
 
-  // 默认最大化打开（macOS 的 zoom 状态，绿按钮会同步点亮）。
-  // 在 ready-to-show 之前调，首帧就是最大化，无白屏/尺寸跳动；
-  // resize 写盘逻辑会跳过最大化状态，settings 里不会被记入全屏尺寸
+  // 先建立最大化的窗口状态，作为退出原生全屏后的恢复尺寸。
+  // 首帧就绪后再进入全屏，避免展示尚未加载的页面。
   win.maximize()
 
-  win.on('ready-to-show', () => {
+  win.once('ready-to-show', () => {
     win.show()
+    win.setFullScreen(true)
   })
 
   // 窗口标题由 windowManager 统一组装。页面加载完成时 Electron 默认会用 document.title

@@ -3,6 +3,7 @@ import { useStore } from './store'
 import { Toolbar } from './components/Toolbar'
 import { OssPanel } from './components/OssPanel'
 import { TextEditorPage } from './components/TextEditorPage'
+import { SyncPanel } from './components/SyncPanel'
 import { useMenuAction } from './hooks/useMenuAction'
 
 function Toast(): JSX.Element | null {
@@ -34,6 +35,27 @@ function Toast(): JSX.Element | null {
 function App(): JSX.Element {
   const theme = useStore((s) => s.theme)
   const isInitialized = useStore((s) => s.isInitialized)
+
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api) return
+    let mounted = true
+    const unsubscribe = api.onOssSyncState((state) => {
+      if (mounted) useStore.getState().applySyncState(state)
+    })
+    void api
+      .getOssSyncState()
+      .then((state) => {
+        if (mounted && state) useStore.getState().applySyncState(state)
+      })
+      .catch((err) => {
+        if (mounted) useStore.setState({ syncError: String(err) })
+      })
+    return () => {
+      mounted = false
+      unsubscribe()
+    }
+  }, [])
 
   // Tailwind 的 darkMode: 'class' 依赖 <html> 上的 dark 类
   useEffect(() => {
@@ -77,14 +99,17 @@ function App(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col bg-white dark:bg-gray-900">
-      <Toolbar onToggleTheme={handleToggleTheme} />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <Toolbar onToggleTheme={handleToggleTheme} />
 
-      <main className="flex-1 overflow-hidden">
-        <OssPanel />
-      </main>
+        <main className="flex-1 overflow-hidden">
+          <OssPanel />
+        </main>
 
-      {/* 全屏文本编辑页，非空时覆盖文件列表 */}
-      <TextEditorPage />
+        {/* 全屏文本编辑页，非空时覆盖文件列表 */}
+        <TextEditorPage />
+      </div>
+      <SyncPanel />
 
       <Toast />
     </div>

@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { ChevronRight, FileText, Folder, Loader2, RefreshCw } from 'lucide-react'
 import { useStore } from '../store'
 import type { OssDirState } from '../store/types'
+import { isSyncActive } from '../../shared/constants'
 import { isTextFileName } from '../../shared/path'
 
 /** 字节数的人类可读格式 */
@@ -33,6 +34,12 @@ function baseName(key: string): string {
  * 状态与请求逻辑在 store/ossSlice，本组件只做渲染。
  */
 export function OssPanel(): JSX.Element {
+  const syncState = useStore((s) => s.syncState)
+  const syncRequestPending = useStore((s) => s.syncRequestPending)
+  const syncDirLocal = useStore((s) => s.syncDirLocal)
+  const syncConfigError = useStore((s) => s.syncConfigError)
+  const startSync = useStore((s) => s.startSync)
+  const busy = isSyncActive(syncState?.phase) || syncRequestPending
   const activeBucket = useStore((s) => s.activeBucket)
   const configError = useStore((s) => s.configError)
   const dirStates = useStore((s) => s.dirStates)
@@ -44,11 +51,14 @@ export function OssPanel(): JSX.Element {
   // 首屏引导：读 .env 连接配置并自动进入默认 bucket。
   // store action 不是 React setState，不受 set-state-in-effect 约束
   useEffect(() => {
-    void bootstrap()
+    void bootstrap(false)
   }, [bootstrap])
 
   /** 文件行：纯文本文件可点击进入在线编辑，其余暂时只展示 */
-  const renderFileRow = (file: { key: string; size: number; lastModified: string }, depth: number): JSX.Element => {
+  const renderFileRow = (
+    file: { key: string; size: number; lastModified: string },
+    depth: number
+  ): JSX.Element => {
     const inner = (
       <>
         <FileText size={14} className="shrink-0 text-gray-400" />
@@ -85,11 +95,7 @@ export function OssPanel(): JSX.Element {
       )
     }
     return (
-      <div
-        key={file.key}
-        className="flex items-center gap-1.5 rounded py-1 pr-3"
-        style={style}
-      >
+      <div key={file.key} className="flex items-center gap-1.5 rounded py-1 pr-3" style={style}>
         {inner}
       </div>
     )
@@ -224,15 +230,37 @@ export function OssPanel(): JSX.Element {
         <span className="font-mono text-xs font-medium text-gray-900 dark:text-gray-100">
           {activeBucket}
         </span>
-        <button
-          type="button"
-          title="刷新（重新读取配置并回到根目录）"
-          aria-label="刷新"
-          onClick={() => void bootstrap()}
-          className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-        >
-          <RefreshCw size={13} />
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy || !syncDirLocal || !!syncConfigError}
+            onClick={() => void startSync('download')}
+            className="rounded bg-blue-600 px-3 py-1 text-xs text-white disabled:opacity-40"
+          >
+            同步到本地
+          </button>
+          <button
+            type="button"
+            disabled={busy || !syncDirLocal || !!syncConfigError}
+            onClick={() => void startSync('upload')}
+            className="rounded bg-blue-600 px-3 py-1 text-xs text-white disabled:opacity-40"
+          >
+            同步到云端
+          </button>
+          <button
+            disabled={busy}
+            type="button"
+            title="刷新（重新读取配置并回到根目录）"
+            aria-label="刷新"
+            onClick={() => void bootstrap()}
+            className="rounded p-1 text-gray-500 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+          >
+            <RefreshCw size={13} />
+          </button>
+        </div>
+      </div>
+      <div className="break-all border-b border-gray-200 px-3 py-1 text-xs text-gray-500 dark:border-gray-700">
+        {syncConfigError ?? `本地目录：${syncDirLocal ?? '未配置'}`}
       </div>
       <div className="flex-1 overflow-auto py-1">
         {rootState?.status === 'error' ? (

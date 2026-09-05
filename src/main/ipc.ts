@@ -10,7 +10,16 @@ import {
   getWindowNumber
 } from './windowManager'
 import { updateSettings } from './settings'
-import { listBuckets as ossListBuckets, listObjects as ossListObjects, getObjectText, putObjectText, getDefaultBucket, toOssError } from './oss'
+import {
+  listBuckets as ossListBuckets,
+  listObjects as ossListObjects,
+  getObjectText,
+  putObjectText,
+  getDefaultBucket,
+  getConnectionInfo,
+  releaseOssConnection,
+  toOssError
+} from './oss'
 import type {
   FileFilter,
   FileResult,
@@ -20,6 +29,8 @@ import type {
   OssObjectListing,
   OssResult,
   OssTextContent,
+  OssObjectVersion,
+  OssTextSaveResult,
   SaveResult,
   Theme,
   WindowConfig,
@@ -62,6 +73,35 @@ async function promptAndWrite(
 }
 
 export function registerIpcHandlers(): void {
+  // 仅用于 beforeunload 的同步决定；不依赖可能滞后的异步状态上报。
+  ipcMain.on(IPC_CHANNELS.WINDOW_CONFIRM_CLOSE, (event, saving: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) {
+      event.returnValue = false
+      return
+    }
+    if (saving) {
+      dialog.showMessageBoxSync(win, {
+        type: 'info',
+        message: '文件正在保存，请等待保存完成后再关闭。',
+        buttons: ['继续等待']
+      })
+      event.returnValue = false
+      return
+    }
+    event.returnValue =
+      dialog.showMessageBoxSync(win, {
+        type: 'warning',
+        message: '有未保存的修改，确定放弃吗？',
+        detail: '选择取消可返回编辑器继续编辑或保存。',
+        buttons: ['取消', '放弃修改'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      }) === 1
+  })
+  const connectionOwners = new Set<number>()
+
   // 说明：以下 handler 里的 readFile / writeFile 失败时会让 invoke 的 promise reject，
   // 由渲染层统一 try/catch 并弹出错误 toast（见 renderer/App.tsx）。
   ipcMain.handle(
@@ -134,9 +174,9 @@ export function registerIpcHandlers(): void {
   //（自定义字段跨进程序列化会丢失，只剩 message，见 shared/types.ts 的注释）
   ipcMain.handle(
     IPC_CHANNELS.OSS_LIST_BUCKETS,
-    async (): Promise<OssResult<OssBucketSummary[]>> => {
+    async (event): Promise<OssResult<OssBucketSummary[]>> => {
       try {
-        return { ok: true, data: await ossListBuckets() }
+        return { ok: true, data: await ossListBuckets(event.sender.id) }
       } catch (err) {
         return { ok: false, error: toOssError(err) }
       }
@@ -146,7 +186,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.OSS_LIST_OBJECTS,
     async (
-      _event,
+      event,
       bucket: string,
       prefix: string,
       continuationToken?: string | null
@@ -154,7 +194,7 @@ export function registerIpcHandlers(): void {
       try {
         return {
           ok: true,
-          data: await ossListObjects(bucket, prefix, continuationToken ?? null)
+          data: await ossListObjects(event.sender.id, bucket, prefix, continuationToken ?? null)
         }
       } catch (err) {
         return { ok: false, error: toOssError(err) }
@@ -164,14 +204,29 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.OSS_GET_CONFIG,
-    (): OssResult<OssConnectionInfo> => ({ ok: true, data: { defaultBucket: getDefaultBucket() } })
+    (event, reload = false): OssResult<OssConnectionInfo> => {
+      const owner = event.sender.id
+      if (!connectionOwners.has(owner)) {
+        connectionOwners.add(owner)
+        event.sender.once('destroyed', () => {
+          connectionOwners.delete(owner)
+          releaseOssConnection(owner)
+        })
+      }
+      try {
+        getDefaultBucket(owner, reload)
+        return { ok: true, data: getConnectionInfo(owner) }
+      } catch (err) {
+        return { ok: false, error: toOssError(err) }
+      }
+    }
   )
 
   ipcMain.handle(
     IPC_CHANNELS.OSS_GET_OBJECT_TEXT,
-    async (_event, bucket: string, key: string): Promise<OssResult<OssTextContent>> => {
+    async (event, bucket: string, key: string): Promise<OssResult<OssTextContent>> => {
       try {
-        return { ok: true, data: await getObjectText(bucket, key) }
+        return { ok: true, data: await getObjectText(event.sender.id, bucket, key) }
       } catch (err) {
         return { ok: false, error: toOssError(err) }
       }
@@ -181,13 +236,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.OSS_PUT_OBJECT_TEXT,
     async (
-      _event,
+      event,
       bucket: string,
       key: string,
-      content: string
-    ): Promise<OssResult<{ key: string }>> => {
+      content: string,
+      version: OssObjectVersion
+    ): Promise<OssResult<OssTextSaveResult>> => {
       try {
-        return { ok: true, data: await putObjectText(bucket, key, content) }
+        return {
+          ok: true,
+          data: await putObjectText(event.sender.id, bucket, key, content, version)
+        }
       } catch (err) {
         return { ok: false, error: toOssError(err) }
       }

@@ -89,10 +89,66 @@ export interface OssErrorInfo {
 export interface OssConnectionInfo {
   /** .env 里 oss_bucket 指定的默认 bucket，用于首屏自动进入 */
   defaultBucket: string | null
+  syncDirLocal: string | null
+  syncConfigError: string | null
+}
+
+export type SyncDirection = 'download' | 'upload'
+export type SyncPhase =
+  | 'scanning'
+  | 'comparing'
+  | 'transferring'
+  | 'cancelling'
+  | 'success'
+  | 'partial'
+  | 'cancelled'
+  | 'failed'
+export interface SyncState {
+  taskId: string
+  revision: number
+  direction: SyncDirection
+  bucket: string
+  localDir: string
+  phase: SyncPhase
+  discovered: number
+  total: number | null
+  processed: number
+  created: number
+  overwritten: number
+  unchanged: number
+  skipped: number
+  failed: number
+  currentFile: string | null
+  issueCount: number
+  message: string | null
+}
+export interface SyncIssue {
+  path: string
+  phase: string
+  kind: 'error' | 'skip'
+  message: string
+  requestId?: string
+}
+export interface SyncIssuePage {
+  items: SyncIssue[]
+  total: number
+}
+
+/** 内容版本来自实际读取响应，不能从列表推测。 */
+export interface OssObjectVersion {
+  etag: string
+  versionId: string | null
+}
+
+export interface OssTextSaveResult {
+  key: string
+  size: number
+  version: OssObjectVersion
 }
 
 /** 文本文件的在线预览/编辑内容，UTF-8 编码 */
 export interface OssTextContent {
+  version: OssObjectVersion
   key: string
   content: string
   /** 字节数（不是字符数） */
@@ -119,6 +175,16 @@ export interface AppSettings {
 
 /** preload 通过 contextBridge 暴露给渲染进程的全部能力 */
 export interface ElectronAPI {
+  startOssSync: (direction: SyncDirection) => Promise<OssResult<{ taskId: string }>>
+  cancelOssSync: (taskId: string) => Promise<OssResult<null>>
+  getOssSyncState: () => Promise<SyncState | null>
+  getOssSyncIssues: (taskId: string, offset: number) => Promise<SyncIssuePage>
+  onOssSyncState: (callback: (state: SyncState) => void) => () => void
+  /** 主进程同步检查任务，避免进度事件尚未到达时卸载页面。 */
+  checkSyncUnload: () => boolean
+
+  /** beforeunload 必须同步取得决定；保存中始终阻止关闭。 */
+  confirmWindowClose: (saving: boolean) => boolean
   openFile: (filters?: FileFilter[]) => Promise<FileResult | null>
   /** filePath 非空时直接覆盖写入，为空时弹出「另存为」对话框 */
   saveFile: (
@@ -141,13 +207,14 @@ export interface ElectronAPI {
     prefix: string,
     continuationToken?: string | null
   ) => Promise<OssResult<OssObjectListing>>
-  getOssConfig: () => Promise<OssResult<OssConnectionInfo>>
+  getOssConfig: (reload?: boolean) => Promise<OssResult<OssConnectionInfo>>
   /** 拉取文本文件内容（UTF-8）。超过大小上限会返回错误 */
   getOssObjectText: (bucket: string, key: string) => Promise<OssResult<OssTextContent>>
   /** 用编辑后的内容覆盖原对象（UTF-8） */
   putOssObjectText: (
     bucket: string,
     key: string,
-    content: string
-  ) => Promise<OssResult<{ key: string }>>
+    content: string,
+    version: OssObjectVersion
+  ) => Promise<OssResult<OssTextSaveResult>>
 }

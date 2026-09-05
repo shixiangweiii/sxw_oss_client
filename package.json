@@ -22,7 +22,10 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"**/*.{ts,tsx,mjs,js,json,css,md,yml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,mjs,js,json,css,md,yml}\"",
-    "make-icon": "node scripts/make-icon.mjs"
+    "make-icon": "node scripts/make-icon.mjs",
+    "test": "node --test scripts/tests/*.test.mjs",
+    "test:electron": "npm run build && electron scripts/tests/electron-smoke.mjs",
+    "test:electron:sync": "npm run build && electron scripts/tests/electron-smoke.mjs --windowed"
   },
   "dependencies": {
     "ali-oss": "^6.23.0"
