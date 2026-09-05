@@ -31,6 +31,19 @@ export interface SyncConnection {
   bucket: string
   localDir: string
 }
+export interface SyncConfirmation {
+  taskId: string
+  direction: SyncDirection
+  bucket: string
+  key: string
+  localPath: string
+  localModifiedAt: number
+  remoteModifiedAt: number
+}
+export type ConfirmOverwrite = (
+  request: SyncConfirmation,
+  signal: AbortSignal
+) => Promise<'overwrite' | 'skip' | 'cancel'>
 interface Entry {
   key: string
   size: number
@@ -51,12 +64,17 @@ function status(err: unknown): number | undefined {
 function etag(value: string): string {
   return value.replace(/^"|"$/g, '')
 }
-function headInfo(head: OSS.HeadObjectResult): { size: number; etag: string } {
+function headInfo(head: OSS.HeadObjectResult): {
+  size: number
+  etag: string
+  modifiedAt: number | null
+} {
   const h = head.res.headers as Record<string, string>
   const size = Number(h['content-length'])
   if (!Number.isSafeInteger(size) || size < 0 || !h.etag)
     throw new Error('OSS 未返回有效大小或 ETag')
-  return { size, etag: h.etag }
+  const modifiedAt = Date.parse(h['last-modified'])
+  return { size, etag: h.etag, modifiedAt: Number.isFinite(modifiedAt) ? modifiedAt : null }
 }
 
 /** 建立路径树，一次性识别大小写、Unicode 别名和文件/目录冲突；冲突传播到子级。 */
@@ -106,6 +124,7 @@ export class SyncManager {
   private temps: SyncTemps
   private recoveryProblems: TempProblem[] = []
   private phase: string = 'scanning'
+  private confirmOverwrite!: ConfirmOverwrite
   constructor(private readonly userData: string) {
     this.temps = new SyncTemps(userData)
   }
@@ -176,9 +195,11 @@ export class SyncManager {
     this.issues.push({ path, phase, kind, ...info })
     this.change({ issueCount: this.issues.length })
   }
-  start(direction: SyncDirection, connection: SyncConnection): string {
+  start(direction: SyncDirection, connection: SyncConnection, confirm: ConfirmOverwrite): string {
     if (direction !== 'download' && direction !== 'upload') throw new Error('无效的同步方向')
+    if (typeof confirm !== 'function') throw new Error('缺少同步覆盖确认处理器')
     const release = reserveSync()
+    this.confirmOverwrite = confirm
     this.controller = new AbortController()
     const taskId = randomUUID()
     this.issues = []
@@ -384,6 +405,60 @@ export class SyncManager {
       this.issue(path, err, 'error', 'cleanup')
     }
   }
+  private async confirmIfNewer(
+    key: string,
+    localPath: string,
+    localModifiedAt: number,
+    remoteModifiedAt: number | null,
+    signal: AbortSignal
+  ): Promise<void> {
+    checkCancelled(signal)
+    if (remoteModifiedAt === null || !Number.isFinite(localModifiedAt))
+      throw new Error('无法获取有效的文件修改时间，已保留目标文件')
+    const state = this.state!
+    const local = Math.floor(localModifiedAt / 1000)
+    const remote = Math.floor(remoteModifiedAt / 1000)
+    if (state.direction === 'upload' ? remote <= local : local <= remote) return
+    this.phase = 'confirming'
+    this.change({ phase: 'confirming', currentFile: key }, true)
+    const request: SyncConfirmation = {
+      taskId: state.taskId,
+      direction: state.direction,
+      bucket: state.bucket,
+      key,
+      localPath,
+      localModifiedAt,
+      remoteModifiedAt
+    }
+    // 即使 UI 处理器没有响应取消，也必须释放任务等待；迟到的选择不会继续写入。
+    let abort: () => void = () => {}
+    const confirm = this.confirmOverwrite
+    let answer: Awaited<ReturnType<ConfirmOverwrite>>
+    try {
+      answer = await new Promise<Awaited<ReturnType<ConfirmOverwrite>>>((resolve, reject) => {
+        abort = () => reject(new SyncCancelled())
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) return abort()
+        Promise.resolve()
+          .then(() => {
+            checkCancelled(signal)
+            return confirm(request, signal)
+          })
+          .then(resolve, reject)
+      })
+    } finally {
+      signal.removeEventListener('abort', abort)
+    }
+    checkCancelled(signal)
+    if (answer === 'cancel') {
+      this.cancel(state.taskId)
+      throw new SyncCancelled()
+    }
+    if (answer === 'skip')
+      throw new SyncSkip(`${state.direction === 'upload' ? '云端' : '本地'}文件较新，用户选择跳过`)
+    if (answer !== 'overwrite') throw new Error('无效的覆盖确认结果，已保留目标文件')
+    this.step('comparing', request.key)
+  }
   private async remoteHash(
     client: OSS,
     key: string,
@@ -422,6 +497,9 @@ export class SyncManager {
     const info = headInfo(await client.head(entry.key, requestOptions()))
     if ((entry.etag && etag(info.etag) !== etag(entry.etag)) || info.size !== entry.size)
       throw new Error('对象在扫描后发生变化，请重新同步')
+    if (before && Number(before.size) !== info.size)
+      await this.confirmIfNewer(entry.key, target, Number(before.mtimeMs), info.modifiedAt, signal)
+    checkCancelled(signal)
     const dir = await this.temps.create(dirname(target))
     try {
       const temp = join(dir, 'content')
@@ -431,7 +509,16 @@ export class SyncManager {
       await safePath(root, entry.key)
       if (before && Number(before.size) === incoming.size) {
         const existing = await snapshotFile(target, signal)
+        if (!sameFile(before, existing.stat))
+          throw new Error('本地目标在同步期间变化，已保留当前文件')
         if (existing.hash === incoming.hash) return 'unchanged'
+        await this.confirmIfNewer(
+          entry.key,
+          target,
+          Number(before.mtimeMs),
+          info.modifiedAt,
+          signal
+        )
       }
       checkCancelled(signal)
       const now = await maybeStat(target)
@@ -440,6 +527,7 @@ export class SyncManager {
       await safePath(root, entry.key)
       // 只保留已有目标的基本读写执行位，不将临时文件的 0600 强加给已有文件。
       if (before) await chmod(temp, Number(before.mode & 0o777n))
+      checkCancelled(signal)
       await rename(temp, target)
       return before ? 'overwritten' : 'created'
     } finally {
@@ -538,6 +626,14 @@ export class SyncManager {
         if (remote.size !== existing.size) throw new Error('云端比较读取大小不符')
         if (remote.hash === snapshot.hash) return 'unchanged'
       }
+      if (existing)
+        await this.confirmIfNewer(
+          entry.key,
+          source,
+          Number(snapshot.stat.mtimeMs),
+          existing.modifiedAt,
+          signal
+        )
       checkCancelled(signal)
       this.step('transferring', entry.key)
       // 快照文件无扩展名，上传 MIME 必须从原始 key 推导，不能取临时路径。

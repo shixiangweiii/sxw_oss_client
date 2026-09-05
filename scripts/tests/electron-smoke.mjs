@@ -28,13 +28,38 @@ dialog.showMessageBoxSync = (_win, options) => {
   dialogs.push(options.message)
   return answer
 }
+const nativeMessageBox = dialog.showMessageBox.bind(dialog)
+let useNativeConfirmation = false
+let holdConfirmation = false
+const confirmationDialogs = []
+dialog.showMessageBox = (parent, options) => {
+  if (useNativeConfirmation) {
+    const box = { parent, options, closed: false }
+    confirmationDialogs.push(box)
+    return nativeMessageBox(parent, options).finally(() => {
+      box.closed = true
+    })
+  }
+  return new Promise((resolve) => {
+    const respond = (response) => {
+      options.signal.removeEventListener('abort', abort)
+      resolve({ response, checkboxChecked: false })
+    }
+    const abort = () => respond(options.cancelId)
+    options.signal.addEventListener('abort', abort, { once: true })
+    confirmationDialogs.push({ parent, options, respond })
+    if (options.signal.aborted) abort()
+    else if (!holdConfirmation) respond(1)
+  })
+}
 let revision = 0
 let remote = 'initial'
 let saveGate = null
 const writes = []
 const headers = () => ({
   etag: `"${revision}"`,
-  'content-length': String(Buffer.byteLength(remote))
+  'content-length': String(Buffer.byteLength(remote)),
+  'last-modified': 'Wed, 01 Jan 2020 00:00:00 GMT'
 })
 class FixtureOSS {
   constructor(options) {
@@ -250,7 +275,7 @@ async function run() {
     await clickSync(second, 'download')
     assert.equal((await syncFinished(second)).phase, 'success')
     assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), remote)
-    await until(async () => (await text(first)).includes('全部成功'), '全窗口任务广播')
+    await until(async () => (await text(first)).includes('已完成'), '全窗口任务广播')
     console.log('PASS 下载按钮 / 实际本地文件 / 全窗口进度')
 
     remote = 'download preserving mode'
@@ -285,6 +310,72 @@ async function run() {
         process.env.OSS_SMOKE_SCREENSHOT,
         (await second.webContents.capturePage()).toPNG()
       )
+
+    // 真实 IPC/窗口与可控原生弹窗替身：等待、跳过、恢复及取消。
+    holdConfirmation = true
+    const originalLocal = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
+    remote = 'new remote conflict'
+    revision++
+    let confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '覆盖确认弹窗')
+    await until(async () => (await text(first)).includes('等待覆盖确认'), '其他窗口等待状态')
+    assert.equal(confirmationDialogs.at(-1).parent, second)
+    assert.equal((await syncState(second)).processed, 0)
+    assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), originalLocal)
+    const duplicateConfirmation = await js(first, "window.electronAPI.startOssSync('upload')")
+    assert.equal(duplicateConfirmation.ok, false)
+    answer = 0
+    second.close()
+    await until(() => confirmationDialogs.length === confirmCount + 2, '关闭取消后恢复同一确认')
+    assert.equal(
+      confirmationDialogs.at(-1).options.detail,
+      confirmationDialogs.at(-2).options.detail
+    )
+    confirmationDialogs.at(-1).respond(0)
+    const skipped = await syncFinished(second)
+    assert.equal(skipped.skipped, 1)
+    assert.equal(skipped.overwritten, 0)
+    assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), originalLocal)
+    confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '再次覆盖确认')
+    confirmationDialogs.at(-1).respond(2)
+    assert.equal((await syncFinished(second)).phase, 'cancelled')
+    assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), originalLocal)
+    confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '确认覆盖前等待')
+    confirmationDialogs.at(-1).respond(1)
+    assert.equal((await syncFinished(second)).overwritten, 1)
+    assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), remote)
+    holdConfirmation = false
+    console.log('PASS 覆盖确认 / 多窗口等待 / 关闭后恢复 / 跳过 / 取消 / 确认后实际覆盖')
+
+    if (process.argv.includes('--native-confirmation')) {
+      useNativeConfirmation = true
+      remote = 'native dialog fixture'
+      revision++
+      confirmCount = confirmationDialogs.length
+      const beforeNative = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
+      await clickSync(second, 'download')
+      await until(() => confirmationDialogs.length === confirmCount + 1, '真实原生覆盖弹窗')
+      await pause(600)
+      assert.equal((await syncState(second)).phase, 'confirming')
+      answer = 0
+      app.quit()
+      await until(() => confirmationDialogs.length === confirmCount + 2, '真实原生弹窗收起后恢复')
+      assert.equal(confirmationDialogs.at(-2).closed, true)
+      await pause(600)
+      assert.equal((await syncState(second)).phase, 'confirming')
+      const nativeTask = await syncState(second)
+      await js(first, `window.electronAPI.cancelOssSync('${nativeTask.taskId}')`)
+      assert.equal((await syncFinished(second)).phase, 'cancelled')
+      await until(() => confirmationDialogs.at(-1).closed, '取消信号关闭真实原生弹窗')
+      assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), beforeNative)
+      useNativeConfirmation = false
+      console.log('PASS 真实 macOS 原生弹窗展示 / 退出时收起和恢复 / 取消信号关闭 / 保留目标')
+    }
 
     // 在途上传可取消，但必须等待请求结束再关闭；其他窗口的草稿仍需单独确认。
     await draft(first, 'unsaved during sync')

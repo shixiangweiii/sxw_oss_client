@@ -97,6 +97,7 @@ export type SyncDirection = 'download' | 'upload'
 export type SyncPhase =
   | 'scanning'
   | 'comparing'
+  | 'confirming'
   | 'transferring'
   | 'cancelling'
   | 'success'

@@ -69,3 +69,18 @@ test('启动等待响应时阻止重复点击，主进程错误可见且解锁�
   assert.match(s.get().syncError, /正在保存/)
   assert.equal(s.get().syncRequestPending, false)
 })
+
+test('等待确认保持任务活跃，不刷新云端列表、不允许启动下一任务', async () => {
+  let starts = 0
+  const s = store({
+    startOssSync: async () => {
+      starts++
+    }
+  })
+  s.get().applySyncState(progress(1, 'confirming'))
+  await s.get().startSync('upload')
+  assert.equal(starts, 0)
+  assert.equal(s.refreshes(), 0)
+  s.get().applySyncState(progress(2, 'success'))
+  assert.equal(s.refreshes(), 1)
+})

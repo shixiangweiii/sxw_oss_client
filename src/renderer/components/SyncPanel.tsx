@@ -5,9 +5,10 @@ import type { SyncPhase } from '../../shared/types'
 const labels: Record<SyncPhase, string> = {
   scanning: '扫描中',
   comparing: '比较内容',
+  confirming: '等待覆盖确认',
   transferring: '传输中',
   cancelling: '取消中',
-  success: '全部成功',
+  success: '已完成',
   partial: '部分失败',
   cancelled: '已取消',
   failed: '任务失败'
@@ -15,6 +16,7 @@ const labels: Record<SyncPhase, string> = {
 const issueStages: Record<string, string> = {
   scanning: '扫描',
   comparing: '比较',
+  confirming: '覆盖确认',
   transferring: '传输',
   cleanup: '清理'
 }
@@ -60,8 +62,8 @@ export function SyncPanel(): JSX.Element | null {
             {state.total === null
               ? `已发现 ${state.discovered} 项`
               : `已处理 ${state.processed} / ${state.total} 项`}{' '}
-            · 新增 {state.created} · 覆盖 {state.overwritten} · 内容相同 {state.unchanged} ·
-            其他跳过 {state.skipped} · 失败 {state.failed}
+            · 新增 {state.created} · 覆盖 {state.overwritten} · 内容相同 {state.unchanged} · 已跳过{' '}
+            {state.skipped} · 失败 {state.failed}
           </p>
           {state.total !== null && (
             <progress

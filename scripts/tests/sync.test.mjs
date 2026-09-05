@@ -10,10 +10,13 @@ import { createServer } from 'node:http'
 import { Readable, Writable } from 'node:stream'
 import { sourceLoader, deferred, tick } from './source-loader.mjs'
 
+const approve = async () => 'overwrite'
+const modified = 'Wed, 01 Jan 2020 00:00:00 GMT'
 const hash = (data) => createHash('sha256').update(data).digest('hex')
 class Cloud {
   constructor(objects = {}) {
     this.objects = new Map(Object.entries(objects).map(([k, v]) => [k, Buffer.from(v)]))
+    this.modified = new Map()
     this.puts = []
     this.gets = []
     this.pages = []
@@ -22,7 +25,11 @@ class Cloud {
   info(key) {
     const data = this.objects.get(key)
     if (!data) throw Object.assign(new Error('不存在'), { status: 404 })
-    return { etag: '"multipart-' + hash(data) + '"', 'content-length': String(data.length) }
+    return {
+      etag: '"multipart-' + hash(data) + '"',
+      'content-length': String(data.length),
+      'last-modified': this.modified.has(key) ? this.modified.get(key) : modified
+    }
   }
   async listV2(query, options) {
     assert.equal(query.delimiter, undefined)
@@ -92,7 +99,7 @@ async function fixture(t, objects = {}, overrides = {}) {
   }
   const read = (key) => fsp.readFile(path.join(local, key))
   const run = async (direction) => {
-    manager.start(direction, connection)
+    manager.start(direction, connection, approve)
     await manager.wait()
     return manager.getState()
   }
@@ -308,7 +315,7 @@ test('取消流式下载会保留原文件、不处理下一文件、清理后�
     entered.resolve()
     return { stream }
   }
-  const taskId = f.manager.start('download', f.connection)
+  const taskId = f.manager.start('download', f.connection, approve)
   await entered.promise
   await tick()
   f.manager.cancel(taskId)
@@ -333,7 +340,7 @@ test('取消已提交的普通上传：等待请求结束，保留已成功写�
     await finish.promise
     return original(...args)
   }
-  const id = f.manager.start('upload', f.connection)
+  const id = f.manager.start('upload', f.connection, approve)
   await entered.promise
   f.manager.cancel(id)
   assert.equal(f.manager.getState().phase, 'cancelling')
@@ -354,7 +361,7 @@ test('64 MiB 使用分片上传；取消等待分片结束再清理，清理失�
   f.client.multipartGate = gate
   f.client.abortError = true
   f.client.onPart = () => entered.resolve()
-  const id = f.manager.start('upload', f.connection)
+  const id = f.manager.start('upload', f.connection, approve)
   await entered.promise
   await tick()
   f.manager.cancel(id)
@@ -374,13 +381,13 @@ test('进程级同步与在线保存原子互斥，终态后释放', async (t) =
     ops = f.load('src/main/operations.ts')
   const gate = deferred(),
     save = ops.withTextWrite(() => gate.promise)
-  assert.throws(() => f.manager.start('upload', f.connection), /正在保存/)
+  assert.throws(() => f.manager.start('upload', f.connection, approve), /正在保存/)
   gate.resolve()
   await save
   const listed = deferred()
   f.client.listV2 = () => listed.promise
-  const id = f.manager.start('upload', f.connection)
-  assert.throws(() => f.manager.start('download', f.connection), /同步进行中/)
+  const id = f.manager.start('upload', f.connection, approve)
+  assert.throws(() => f.manager.start('download', f.connection, approve), /同步进行中/)
   await assert.rejects(
     ops.withTextWrite(async () => {}),
     /同步进行中/
@@ -444,7 +451,7 @@ test('分片成功按序合并，分片失败必须等其余在途请求结束�
       )
       completed = true
     }
-    f.manager.start('upload', f.connection)
+    f.manager.start('upload', f.connection, approve)
     if (fail) {
       await started.promise
       await tick()
@@ -527,6 +534,7 @@ test('真实 ali-oss SDK 与本机 HTTP 服务验证列表、HEAD、条件流式
       res.writeHead(200, {
         etag: version,
         'content-length': value.length,
+        'last-modified': modified,
         'x-oss-request-id': 'local-fixture'
       })
       res.end(req.method === 'HEAD' ? undefined : value)
@@ -682,7 +690,7 @@ test('取消时已完成上传仍计入成功，清理失败不会被取消状�
     committed = true
     return r
   }
-  const id = f.manager.start('upload', f.connection)
+  const id = f.manager.start('upload', f.connection, approve)
   await entered.promise
   f.manager.cancel(id)
   finish.resolve()
@@ -798,7 +806,7 @@ test('坏清单原样备份并恢复可用；失去清单的可疑临时目录�
       )
   )
   const restarted = new (f.load('src/main/sync.ts').SyncManager)(f.userData)
-  restarted.start('upload', f.connection)
+  restarted.start('upload', f.connection, approve)
   await restarted.wait()
   assert.equal(restarted.getState().phase, 'success')
   assert.equal(restarted.getState().skipped, 1)
@@ -878,7 +886,11 @@ test('真实 SDK 两页/三页及重复扫描无游标污染，后续 HEAD/GET/P
         res.end()
         return
       }
-      res.writeHead(200, { etag: version, 'content-length': data.length })
+      res.writeHead(200, {
+        etag: version,
+        'content-length': data.length,
+        'last-modified': modified
+      })
       res.end(req.method === 'HEAD' ? undefined : data)
     })().catch((err) => {
       res.writeHead(500)
@@ -901,6 +913,8 @@ test('真实 SDK 两页/三页及重复扫描无游标污染，后续 HEAD/GET/P
     secure: false,
     cname: true
   })
+  // 本用例直接检查各协议阶段，先建立完整的任务上下文。
+  await f.run('upload')
   for (total of [1001, 2001, 1001]) {
     const start = requests.length
     const entries = await f.manager.cloudEntries(client, new AbortController().signal, false)
@@ -910,9 +924,18 @@ test('真实 SDK 两页/三页及重复扫描无游标污染，后续 HEAD/GET/P
       requests.slice(start).map((r) => r.token),
       total === 1001 ? [null, 't1000'] : [null, 't1000', 't2000']
     )
+    f.manager.state.direction = 'download'
+    // 文件身份来自本次操作参数，不依赖预先设置进度字段。
+    f.manager.confirmOverwrite = async (request) => {
+      assert.equal(request.key, entries[0].key)
+      assert.equal(request.localPath, path.join(f.local, entries[0].key))
+      assert.equal(f.manager.getState().currentFile, entries[0].key)
+      return 'overwrite'
+    }
     await f.write(entries[0].key, 'outdated')
     await f.manager.download(client, f.local, entries[0], new AbortController().signal)
     assert.deepEqual(await f.read(entries[0].key), valueFor(entries[0].key))
+    f.manager.state.direction = 'upload'
     await f.write(entries[0].key, 'new value ' + total)
     await f.manager.upload(
       client,
@@ -933,4 +956,206 @@ test('真实 SDK 两页/三页及重复扫描无游标污染，后续 HEAD/GET/P
   }
   assert.ok(requests.some((r) => r.method === 'PUT'))
   await f.clean()
+})
+
+// 固定时间保证判断不依赖测试机器的时钟或文件系统亚秒精度。
+const localTime = Date.UTC(2024, 0, 1) / 1000
+async function setLocalTime(f, key, seconds = localTime) {
+  await fsp.utimes(path.join(f.local, key), seconds, seconds)
+}
+for (const direction of ['upload', 'download']) {
+  test(`${direction} 内容与时间矩阵：同 hash 优先、较新逐个确认、同秒直接更新`, async (t) => {
+    for (const [localContent, remoteContent] of [
+      ['same', 'same'],
+      ['new!', 'old!'],
+      ['long local', 'x']
+    ]) {
+      for (const delta of [-10, 0, 10]) {
+        const f = await fixture(t, { a: remoteContent })
+        await f.write('a', localContent)
+        await setLocalTime(f, 'a', localTime + 0.8)
+        f.client.modified.set('a', new Date((localTime + delta) * 1000).toUTCString())
+        const prompts = []
+        f.manager.start(direction, f.connection, async (request) => {
+          prompts.push(request)
+          assert.equal(f.manager.getState().phase, 'confirming')
+          assert.equal(f.manager.getState().processed, 0)
+          assert.deepEqual(f.client.puts, [])
+          assert.equal((await f.read('a')).toString(), localContent)
+          return 'overwrite'
+        })
+        await f.manager.wait()
+        const state = f.manager.getState()
+        assert.equal(state.phase, 'success')
+        const same = localContent === remoteContent
+        const newer = direction === 'upload' ? delta > 0 : delta < 0
+        assert.equal(prompts.length, Number(!same && newer))
+        assert.equal(state.unchanged, Number(same))
+        assert.equal(state.overwritten, Number(!same))
+        assert.equal(
+          direction === 'upload'
+            ? f.client.objects.get('a').toString()
+            : (await f.read('a')).toString(),
+          direction === 'upload' ? localContent : remoteContent
+        )
+        if (prompts.length) {
+          assert.equal(prompts[0].localPath, path.join(f.local, 'a'))
+          assert.equal(prompts[0].direction, direction)
+          assert.equal(prompts[0].bucket, 'test-bucket')
+        }
+        await f.clean()
+      }
+    }
+  })
+
+  test(`${direction} 跳过保留目标并继续下一个文件；同内容不受无效时间影响`, async (t) => {
+    const f = await fixture(t, { a: 'remote a', b: 'remote b', same: 'same' })
+    for (const key of ['a', 'b', 'same']) {
+      await f.write(key, key === 'same' ? 'same' : `local ${key}`)
+      await setLocalTime(f, key)
+      f.client.modified.set(
+        key,
+        new Date((localTime + (direction === 'upload' ? 10 : -10)) * 1000).toUTCString()
+      )
+    }
+    f.client.modified.set('same', 'invalid')
+    const calls = []
+    const before = await fsp.stat(path.join(f.local, 'a'), { bigint: true })
+    f.manager.start(direction, f.connection, async ({ key }) => {
+      calls.push(key)
+      return key === 'a' ? 'skip' : 'overwrite'
+    })
+    await f.manager.wait()
+    const state = f.manager.getState()
+    assert.deepEqual(calls, ['a', 'b'])
+    assert.equal(state.skipped, 1)
+    assert.equal(state.overwritten, 1)
+    assert.equal(state.unchanged, 1)
+    assert.equal(state.processed, 3)
+    assert.equal(state.phase, 'success')
+    assert.equal((await f.read('a')).toString(), 'local a')
+    assert.equal(f.client.objects.get('a').toString(), 'remote a')
+    assert.equal(
+      (await fsp.stat(path.join(f.local, 'a'), { bigint: true })).mtimeNs,
+      before.mtimeNs
+    )
+    assert.match(f.manager.getIssues(state.taskId, 0).items[0].message, /用户选择跳过/)
+    if (direction === 'download') assert.ok(!f.client.gets.includes('a'))
+    await f.clean()
+  })
+
+  test(
+    `${direction} 等待确认可取消，迟到的覆盖决定无效且不处理下一项`,
+    { timeout: 5000 },
+    async (t) => {
+      const f = await fixture(t, { a: 'old', b: 'old' })
+      await f.write('a', 'new')
+      await f.write('b', 'new')
+      for (const key of ['a', 'b']) {
+        await setLocalTime(f, key)
+        f.client.modified.set(
+          key,
+          new Date((localTime + (direction === 'upload' ? 10 : -10)) * 1000).toUTCString()
+        )
+      }
+      const entered = deferred(),
+        decision = deferred()
+      const id = f.manager.start(direction, f.connection, () => {
+        entered.resolve()
+        return decision.promise
+      })
+      await entered.promise
+      await tick()
+      assert.equal(f.manager.active, true)
+      assert.equal(f.manager.getState().processed, 0)
+      f.manager.cancel(id)
+      await f.manager.wait()
+      decision.resolve('overwrite')
+      await tick()
+      assert.equal(f.manager.getState().phase, 'cancelled')
+      assert.equal(f.manager.getState().processed, 0)
+      assert.equal(f.manager.getState().skipped, 0)
+      assert.deepEqual(f.client.puts, [])
+      assert.equal((await f.read('a')).toString(), 'new')
+      assert.equal((await f.read('b')).toString(), 'new')
+      await f.clean()
+    }
+  )
+
+  test(`${direction} 无效时间保留不同内容，缺失目标仍可创建`, async (t) => {
+    const f = await fixture(t, { bad: 'cloud', missing: 'cloud' })
+    await f.write('bad', 'local')
+    f.client.modified.set('bad', undefined)
+    f.client.modified.set('missing', undefined)
+    if (direction === 'upload') await f.write('new', 'local')
+    let calls = 0
+    f.manager.start(direction, f.connection, async () => {
+      calls++
+      return 'overwrite'
+    })
+    await f.manager.wait()
+    assert.equal(calls, 0)
+    assert.equal(f.manager.getState().failed, 1)
+    assert.equal(f.manager.getState().created, 1)
+    assert.equal(f.manager.getState().phase, 'partial')
+    assert.equal((await f.read('bad')).toString(), 'local')
+    assert.equal(f.client.objects.get('bad').toString(), 'cloud')
+    await f.clean()
+  })
+}
+
+test('下载同大小比较只读取一次云端；确认期间目标变化不能覆盖', async (t) => {
+  const f = await fixture(t, { a: 'old' })
+  await f.write('a', 'new')
+  await setLocalTime(f, 'a')
+  f.manager.start('download', f.connection, async () => {
+    assert.deepEqual(f.client.gets, ['a'])
+    await f.write('a', 'edited during dialog')
+    return 'overwrite'
+  })
+  await f.manager.wait()
+  assert.equal(f.manager.getState().failed, 1)
+  assert.equal((await f.read('a')).toString(), 'edited during dialog')
+  assert.deepEqual(f.client.gets, ['a'])
+  await f.clean()
+})
+
+test('确认框取消及确认异常均保留目标，取消不计为跳过', async (t) => {
+  for (const answer of ['cancel', 'invalid', 'throw']) {
+    const f = await fixture(t, { a: 'old' })
+    await f.write('a', 'new')
+    f.manager.start('download', f.connection, async () => {
+      if (answer === 'throw') throw new Error('弹窗失败')
+      return answer
+    })
+    await f.manager.wait()
+    assert.equal(f.manager.getState().phase, answer === 'cancel' ? 'cancelled' : 'partial')
+    assert.equal(f.manager.getState().skipped, 0)
+    assert.equal((await f.read('a')).toString(), 'new')
+    await f.clean()
+  }
+})
+
+test('较新的云端大文件必须确认后才初始化分片；跳过不提交任何分片', async (t) => {
+  for (const answer of ['skip', 'overwrite']) {
+    const f = await fixture(t, { large: 'old' })
+    await f.write('large', '')
+    await fsp.truncate(path.join(f.local, 'large'), 64 * 1024 * 1024)
+    await setLocalTime(f, 'large')
+    f.client.modified.set('large', new Date((localTime + 10) * 1000).toUTCString())
+    let inits = 0
+    f.client.initMultipartUpload = async () => {
+      inits++
+      return { uploadId: 'id' }
+    }
+    f.manager.start('upload', f.connection, async () => {
+      assert.equal(inits, 0)
+      assert.equal(f.client.parts, undefined)
+      return answer
+    })
+    await f.manager.wait()
+    assert.equal(inits, answer === 'skip' ? 0 : 1)
+    assert.equal(f.manager.getState()[answer === 'skip' ? 'skipped' : 'overwritten'], 1)
+    await f.clean()
+  }
 })

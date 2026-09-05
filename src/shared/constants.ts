@@ -38,6 +38,7 @@ export function isSyncActive(phase: string | undefined): boolean {
   return (
     phase === 'scanning' ||
     phase === 'comparing' ||
+    phase === 'confirming' ||
     phase === 'transferring' ||
     phase === 'cancelling'
   )
