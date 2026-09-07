@@ -7,8 +7,14 @@ import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import { runDiffSmoke } from './electron-diff-smoke.mjs'
 
 const { app, BrowserWindow, dialog } = electron
+const unhandledErrors = []
+process.on('unhandledRejection', (error) => {
+  unhandledErrors.push(error)
+  console.error('未处理的异步异常：', error)
+})
 const windowed = process.argv.includes('--windowed')
 const require = createRequire(import.meta.url)
 const root = path.resolve(import.meta.dirname, '../..')
@@ -56,6 +62,18 @@ let revision = 0
 let remote = 'initial'
 let saveGate = null
 const writes = []
+let diffObjects = null
+let diffGate = null
+const diffTraffic = []
+const diffHeaders = (key) => {
+  const value = diffObjects.get(key)
+  if (!value) throw new Error('测试云端文件不存在')
+  return {
+    etag: `"diff-${key}-${value.length}"`,
+    'content-length': String(value.length),
+    'last-modified': 'Wed, 01 Jan 2020 00:00:00 GMT'
+  }
+}
 const headers = () => ({
   etag: `"${revision}"`,
   'content-length': String(Buffer.byteLength(remote)),
@@ -65,7 +83,16 @@ class FixtureOSS {
   constructor(options) {
     this.bucket = options.bucket
   }
-  async listV2() {
+  async listV2(query) {
+    if (diffObjects) {
+      const offset = Number(query['continuation-token'] ?? 0)
+      const all = [...diffObjects].map(([name, value]) => ({ name, size: value.length }))
+      return {
+        objects: all.slice(offset, offset + 60),
+        isTruncated: offset + 60 < all.length,
+        nextContinuationToken: String(offset + 60)
+      }
+    }
     return {
       objects: [
         { name: 'a.txt', size: Buffer.byteLength(remote), lastModified: new Date().toISOString() }
@@ -74,13 +101,23 @@ class FixtureOSS {
       isTruncated: false
     }
   }
-  async head() {
+  async head(key) {
+    if (diffObjects) {
+      diffTraffic.push(['HEAD', key])
+      if (diffGate) await diffGate
+      return { res: { headers: diffHeaders(key) } }
+    }
     return { res: { headers: headers() } }
   }
   async get() {
     return { content: Buffer.from(remote), res: { headers: headers() } }
   }
-  async getStream() {
+  async getStream(key, options) {
+    if (diffObjects) {
+      diffTraffic.push(['GET', key])
+      assert.equal(options.headers['If-Match'], diffHeaders(key).etag)
+      return { stream: Readable.from([diffObjects.get(key)]), res: { headers: diffHeaders(key) } }
+    }
     return { stream: Readable.from([Buffer.from(remote)]), res: { headers: headers() } }
   }
   async put(key, content) {
@@ -147,7 +184,7 @@ const save = (win) =>
 const timeout = setTimeout(() => {
   console.error('Electron smoke 总超时')
   app.exit(1)
-}, 120000)
+}, 240000)
 // macOS 全屏切换是异步动画，必须等待事件，而非只读瞬时标志。
 const fullscreenWindows = new Set()
 app.on('browser-window-created', (_event, win) => {
@@ -456,6 +493,24 @@ async function run() {
     assert.equal((await syncState(second)).phase, 'cancelled')
     console.log('PASS 取消同步后刷新页面 / 重载恢复状态')
 
+    await runDiffSmoke({
+      win: second,
+      other: third,
+      localDir: syncLocal,
+      js,
+      text,
+      until,
+      configure: (objects) => {
+        diffObjects = objects
+      },
+      setGate: (gate) => {
+        diffGate = gate
+      },
+      traffic: diffTraffic,
+      writes
+    })
+    diffObjects = null
+
     configuredLocal = 'relative/path'
     await js(second, 'document.querySelector("button[aria-label=刷新]").click()')
     await until(async () => (await text(second)).includes('必须是绝对路径'), '配置错误提示')
@@ -474,11 +529,13 @@ async function run() {
     await draft(first, 'discard me')
     first.close()
     await until(() => first.isDestroyed(), '放弃修改关闭')
-    third.close()
+    if (!third.isDestroyed()) third.close()
     await until(() => third.isDestroyed(), '额外窗口关闭')
     second.close()
     await until(() => second.isDestroyed(), '干净窗口关闭')
     console.log('PASS 放弃关闭 / 干净关闭')
+    await pause(0)
+    assert.equal(unhandledErrors.length, 0, 'Electron 流程不得遗留未处理的异步异常')
     clearTimeout(timeout)
     app.exit(0)
   } catch (error) {

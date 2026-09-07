@@ -156,6 +156,66 @@ export interface OssTextContent {
   size: number
 }
 
+export type DiffPhase =
+  'scanning' | 'comparing' | 'cancelling' | 'success' | 'partial' | 'cancelled' | 'failed'
+export interface DiffScanState {
+  taskId: string
+  bucket: string
+  localDir: string
+  phase: DiffPhase
+  discovered: number
+  total: number | null
+  processed: number
+  different: number
+  unchanged: number
+  uncompared: number
+  currentFile: string | null
+  stale: boolean
+  completedAt: string | null
+  message: string | null
+}
+/** 状态只返回当前窗口的会话，busy 表示全应用的 Diff 读取占用。 */
+export interface DiffSnapshot {
+  revision: number
+  busy: boolean
+  state: DiffScanState | null
+}
+export interface DiffFileMeta {
+  size: number
+  modifiedAt: string | null
+  fingerprint: string
+}
+export interface DiffEntry {
+  key: string
+  local: DiffFileMeta
+  remote: DiffFileMeta
+}
+export interface DiffIssue {
+  key: string
+  message: string
+  requestId?: string
+}
+export interface DiffPage<T> {
+  items: T[]
+  total: number
+}
+export interface DiffText extends DiffFileMeta {
+  content: string
+  bom: boolean
+  eol: string
+  finalNewline: boolean
+}
+export type DiffReadResult =
+  | {
+      kind: 'different'
+      key: string
+      local: DiffText
+      remote: DiffText
+      readAt: string
+      changed: boolean
+    }
+  | { kind: 'identical' | 'unavailable'; key: string; message: string }
+
 /**
  * OSS 通道的统一返回形状。
  * 刻意不用 promise reject：ipcMain 抛出的自定义字段会在序列化时丢失、只剩 message，
@@ -176,6 +236,19 @@ export interface AppSettings {
 
 /** preload 通过 contextBridge 暴露给渲染进程的全部能力 */
 export interface ElectronAPI {
+  startOssDiff: () => Promise<OssResult<{ taskId: string }>>
+  cancelOssDiff: (taskId: string) => Promise<OssResult<null>>
+  getOssDiffState: () => Promise<DiffSnapshot>
+  onOssDiffState: (callback: (snapshot: DiffSnapshot) => void) => () => void
+  getOssDiffEntries: (taskId: string, offset: number) => Promise<OssResult<DiffPage<DiffEntry>>>
+  getOssDiffIssues: (taskId: string, offset: number) => Promise<OssResult<DiffPage<DiffIssue>>>
+  readOssDiff: (
+    taskId: string,
+    key: string,
+    requestId: string
+  ) => Promise<OssResult<DiffReadResult>>
+  cancelOssDiffRead: (taskId: string, requestId: string) => Promise<OssResult<null>>
+  endOssDiff: (taskId: string) => Promise<OssResult<null>>
   startOssSync: (direction: SyncDirection) => Promise<OssResult<{ taskId: string }>>
   cancelOssSync: (taskId: string) => Promise<OssResult<null>>
   getOssSyncState: () => Promise<SyncState | null>

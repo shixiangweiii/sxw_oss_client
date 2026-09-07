@@ -10,6 +10,7 @@ import {
   getWindowNumber
 } from './windowManager'
 import { updateSettings } from './settings'
+import { registerDiffIpcHandlers } from './diffRuntime'
 import {
   listBuckets as ossListBuckets,
   listObjects as ossListObjects,
@@ -73,6 +74,7 @@ async function promptAndWrite(
 }
 
 export function registerIpcHandlers(): void {
+  registerDiffIpcHandlers()
   // 仅用于 beforeunload 的同步决定；不依赖可能滞后的异步状态上报。
   ipcMain.on(IPC_CHANNELS.WINDOW_CONFIRM_CLOSE, (event, saving: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender)

@@ -39,7 +39,9 @@ export function OssPanel(): JSX.Element {
   const syncDirLocal = useStore((s) => s.syncDirLocal)
   const syncConfigError = useStore((s) => s.syncConfigError)
   const startSync = useStore((s) => s.startSync)
-  const busy = isSyncActive(syncState?.phase) || syncRequestPending
+  const startDiff = useStore((s) => s.startDiff)
+  const diffBusy = useStore((s) => s.diffSnapshot.busy || s.diffPending)
+  const busy = isSyncActive(syncState?.phase) || syncRequestPending || diffBusy
   const activeBucket = useStore((s) => s.activeBucket)
   const configError = useStore((s) => s.configError)
   const dirStates = useStore((s) => s.dirStates)
@@ -231,6 +233,20 @@ export function OssPanel(): JSX.Element {
           {activeBucket}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy || !syncDirLocal || !!syncConfigError}
+            title={
+              syncConfigError ??
+              (busy
+                ? '请等待当前同步、保存或 Diff 读取结束'
+                : '比较本地与云端的文本内容（两侧各不超过 2 MB）')
+            }
+            onClick={() => void startDiff()}
+            className="rounded border border-blue-600 px-3 py-1 text-xs text-blue-600 disabled:opacity-40 dark:text-blue-400"
+          >
+            Diff
+          </button>
           <button
             type="button"
             disabled={busy || !syncDirLocal || !!syncConfigError}

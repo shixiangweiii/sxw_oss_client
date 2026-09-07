@@ -4,6 +4,7 @@ import { Toolbar } from './components/Toolbar'
 import { OssPanel } from './components/OssPanel'
 import { TextEditorPage } from './components/TextEditorPage'
 import { SyncPanel } from './components/SyncPanel'
+import { DiffPage } from './components/DiffPage'
 import { useMenuAction } from './hooks/useMenuAction'
 
 function Toast(): JSX.Element | null {
@@ -35,6 +36,27 @@ function Toast(): JSX.Element | null {
 function App(): JSX.Element {
   const theme = useStore((s) => s.theme)
   const isInitialized = useStore((s) => s.isInitialized)
+
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api) return
+    let mounted = true
+    const unsubscribe = api.onOssDiffState((snapshot) => {
+      if (mounted) useStore.getState().applyDiffSnapshot(snapshot)
+    })
+    void api
+      .getOssDiffState()
+      .then((snapshot) => {
+        if (mounted) useStore.getState().applyDiffSnapshot(snapshot)
+      })
+      .catch((error) => {
+        if (mounted) useStore.getState().showToast(`无法获取 Diff 状态：${String(error)}`, 'error')
+      })
+    return () => {
+      mounted = false
+      unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     const api = window.electronAPI
@@ -108,6 +130,7 @@ function App(): JSX.Element {
 
         {/* 全屏文本编辑页，非空时覆盖文件列表 */}
         <TextEditorPage />
+        <DiffPage />
       </div>
       <SyncPanel />
 

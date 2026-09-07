@@ -10,6 +10,7 @@ function store(api = {}) {
     state = { ...state, ...(typeof p === 'function' ? p(state) : p) }
   }
   state = {
+    ...load('src/renderer/store/diffSlice.ts').createDiffSlice(set, () => state),
     ...load('src/renderer/store/syncSlice.ts').createSyncSlice(set, () => state),
     activeBucket: 'b',
     refreshBucket() {

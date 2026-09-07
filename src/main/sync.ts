@@ -5,7 +5,7 @@ import { dirname, join } from 'path'
 import type { BigIntStats } from 'fs'
 import type { SyncDirection, SyncIssue, SyncIssuePage, SyncPhase, SyncState } from '../shared/types'
 import { isSyncActive } from '../shared/constants'
-import { reserveSync } from './operations'
+import { reserveSync, notifyContentChanged } from './operations'
 import {
   SyncCancelled,
   SyncSkip,
@@ -377,6 +377,8 @@ export class SyncManager {
         }
       }
       const errors = this.issues.some((i) => i.kind === 'error')
+      if (this.state && this.state.created + this.state.overwritten > 0)
+        notifyContentChanged(connection.bucket)
       const phase: SyncPhase = signal.aborted
         ? 'cancelled'
         : fatal

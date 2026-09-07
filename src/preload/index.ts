@@ -16,6 +16,28 @@ import type {
  * 只能调用下面这几个具名方法。
  */
 const electronAPI: ElectronAPI = {
+  startOssDiff: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_START),
+  cancelOssDiff: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_CANCEL, taskId),
+  getOssDiffState: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_GET_STATE),
+  getOssDiffEntries: (taskId, offset) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_ENTRIES, taskId, offset),
+  getOssDiffIssues: (taskId, offset) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_ISSUES, taskId, offset),
+  readOssDiff: (taskId, key, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_READ, taskId, key, requestId),
+  cancelOssDiffRead: (taskId, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_CANCEL_READ, taskId, requestId),
+  endOssDiff: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.OSS_DIFF_END, taskId),
+  onOssDiffState: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      snapshot: Parameters<typeof callback>[0]
+    ): void => callback(snapshot)
+    ipcRenderer.on(IPC_CHANNELS.OSS_DIFF_STATE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.OSS_DIFF_STATE, listener)
+    }
+  },
   startOssSync: (direction) => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_START, direction),
   cancelOssSync: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_CANCEL, taskId),
   getOssSyncState: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_GET_STATE),

@@ -42,7 +42,12 @@ export const createOssSlice: StateCreator<
 
     bootstrap: async (reload = true) => {
       // 编辑期间不得更换连接；刷新隐藏在编辑页后，action 本身也做保护。
-      if (get().editor || (reload && isSyncActive(get().syncState?.phase))) return
+      if (
+        get().editor ||
+        get().diffVisible ||
+        (reload && (isSyncActive(get().syncState?.phase) || get().diffSnapshot.busy))
+      )
+        return
       const requestId = ++bootstrapId
       ++treeId
       directoryRequests.clear()
@@ -202,6 +207,7 @@ export const createOssSlice: StateCreator<
     },
 
     openTextFile: (key) => {
+      if (get().diffVisible) return
       const bucket = get().activeBucket
       if (!bucket) return
       if (get().editor?.status === 'saving') return
@@ -256,8 +262,8 @@ export const createOssSlice: StateCreator<
     saveEditor: async () => {
       const { editor, activeBucket } = get()
       if (!editor || !activeBucket) return
-      if (isSyncActive(get().syncState?.phase)) {
-        get().showToast('同步进行中，暂不能保存在线文本', 'error')
+      if (isSyncActive(get().syncState?.phase) || get().diffSnapshot.busy) {
+        get().showToast('同步或 Diff 读取进行中，暂不能保存在线文本', 'error')
         return
       }
       if (editor.status !== 'loaded' || !editor.version) return

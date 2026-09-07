@@ -1,11 +1,26 @@
 /** 文本读取与保存共用的 UTF-8 字节上限。 */
 export const MAX_TEXT_EDIT_BYTES = 2 * 1024 * 1024
+export const MAX_TEXT_DIFF_BYTES = 2 * 1024 * 1024
+export const DIFF_PAGE_SIZE = 100
+
+export function isDiffActive(phase: string | undefined): boolean {
+  return phase === 'scanning' || phase === 'comparing' || phase === 'cancelling'
+}
 
 /**
  * 渲染进程与主进程之间的全部通道名。
  * 新增通道时：先在这里登记，再到 main/ipc.ts 注册 handler，最后在 preload/index.ts 暴露方法。
  */
 export const IPC_CHANNELS = {
+  OSS_DIFF_START: 'oss:diff-start',
+  OSS_DIFF_CANCEL: 'oss:diff-cancel',
+  OSS_DIFF_GET_STATE: 'oss:diff-get-state',
+  OSS_DIFF_STATE: 'oss:diff-state',
+  OSS_DIFF_ENTRIES: 'oss:diff-entries',
+  OSS_DIFF_ISSUES: 'oss:diff-issues',
+  OSS_DIFF_READ: 'oss:diff-read',
+  OSS_DIFF_CANCEL_READ: 'oss:diff-cancel-read',
+  OSS_DIFF_END: 'oss:diff-end',
   OSS_SYNC_START: 'oss:sync-start',
   OSS_SYNC_CANCEL: 'oss:sync-cancel',
   OSS_SYNC_STATE: 'oss:sync-state',

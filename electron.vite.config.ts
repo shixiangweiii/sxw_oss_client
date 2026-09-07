@@ -16,6 +16,7 @@ const PROD_CSP = [
   "img-src 'self' data:",
   "font-src 'self' data:",
   "connect-src 'self'",
+  "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'none'"
@@ -50,6 +51,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
+    worker: { format: 'es' },
     resolve: {
       alias: {
         '@': resolve('src/renderer')

@@ -3,7 +3,11 @@ import type {
   Theme,
   SyncDirection,
   SyncState,
-  SyncIssue
+  SyncIssue,
+  DiffSnapshot,
+  DiffEntry,
+  DiffIssue,
+  DiffReadResult
 } from '../../shared/types'
 
 export interface UiSlice {
@@ -35,7 +39,34 @@ export interface FileSlice {
   clearFile: () => void
 }
 
-export type StoreState = UiSlice & FileSlice & OssSlice & SyncSlice
+export type StoreState = UiSlice & FileSlice & OssSlice & SyncSlice & DiffSlice
+
+export interface DiffDetailState {
+  key: string
+  requestId: string
+  status: 'loading' | 'loaded' | 'error'
+  result: DiffReadResult | null
+  error: string | null
+}
+export interface DiffSlice {
+  diffSnapshot: DiffSnapshot
+  diffVisible: boolean
+  diffPending: boolean
+  diffError: string | null
+  diffEntries: DiffEntry[]
+  diffIssues: DiffIssue[]
+  diffPage: number
+  diffPageLoading: boolean
+  diffDetail: DiffDetailState | null
+  applyDiffSnapshot: (snapshot: DiffSnapshot) => void
+  startDiff: () => Promise<void>
+  cancelDiff: () => Promise<void>
+  closeDiff: () => Promise<void>
+  loadDiffPage: (page?: number) => Promise<void>
+  loadDiffIssues: (more?: boolean) => Promise<void>
+  openDiffFile: (key: string) => Promise<void>
+  closeDiffFile: () => void
+}
 
 // ---------- OSS 文件树 ----------
 

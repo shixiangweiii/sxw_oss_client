@@ -16,7 +16,7 @@ export function TextEditorPage(): JSX.Element | null {
 }
 
 function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
-  const syncBusy = useStore((s) => isSyncActive(s.syncState?.phase))
+  const syncBusy = useStore((s) => isSyncActive(s.syncState?.phase) || s.diffSnapshot.busy)
   const setEditorDraft = useStore((s) => s.setEditorDraft)
   const saveEditor = useStore((s) => s.saveEditor)
   const closeEditor = useStore((s) => s.closeEditor)
@@ -103,7 +103,7 @@ function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
 
       {syncBusy && (
         <p className="px-6 py-2 text-sm text-amber-600">
-          同步进行中，草稿会保留，任务结束后可继续保存。
+          同步或 Diff 读取进行中，草稿会保留，任务结束后可继续保存。
         </p>
       )}
       {oversized && (

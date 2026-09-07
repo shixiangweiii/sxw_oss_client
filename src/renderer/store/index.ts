@@ -4,6 +4,7 @@ import { createUiSlice } from './uiSlice'
 import { createFileSlice } from './fileSlice'
 import { createSyncSlice } from './syncSlice'
 import { createOssSlice } from './ossSlice'
+import { createDiffSlice } from './diffSlice'
 import type { StoreState } from './types'
 
 /**
@@ -17,6 +18,7 @@ export const useStore = create<StoreState>()(
     ...createUiSlice(...a),
     ...createFileSlice(...a),
     ...createOssSlice(...a),
+    ...createDiffSlice(...a),
     ...createSyncSlice(...a)
   }))
 )

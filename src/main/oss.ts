@@ -3,7 +3,7 @@ import { app } from 'electron'
 import { existsSync, readFileSync } from 'fs'
 import { join, isAbsolute, resolve, parse, relative, sep } from 'path'
 import { lstatSync } from 'fs'
-import { assertSyncIdle, withTextWrite } from './operations'
+import { assertSyncIdle, notifyContentChanged, withTextWrite } from './operations'
 import { MAX_TEXT_EDIT_BYTES } from '../shared/constants'
 import type {
   OssBucketSummary,
@@ -358,6 +358,7 @@ export async function putObjectText(
       const res = await client.put(key, Buffer.from(content, 'utf-8'), {
         mime: TEXT_MIME[ext] ?? 'text/plain'
       })
+      notifyContentChanged(bucket)
       return {
         key,
         size: Buffer.byteLength(content, 'utf-8'),

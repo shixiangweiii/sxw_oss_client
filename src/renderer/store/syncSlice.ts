@@ -26,7 +26,13 @@ export const createSyncSlice: StateCreator<
     }
   },
   startSync: async (direction) => {
-    if (get().syncRequestPending || isSyncActive(get().syncState?.phase)) return
+    if (
+      get().syncRequestPending ||
+      isSyncActive(get().syncState?.phase) ||
+      get().diffSnapshot.busy ||
+      get().diffPending
+    )
+      return
     set({ syncRequestPending: true, syncError: null })
     try {
       const result = await window.electronAPI?.startOssSync(direction)

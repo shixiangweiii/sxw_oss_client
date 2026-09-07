@@ -10,6 +10,7 @@ function store(api) {
     state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }
   }
   state = {
+    ...load('src/renderer/store/diffSlice.ts').createDiffSlice(set, () => state),
     ...load('src/renderer/store/ossSlice.ts').createOssSlice(set, () => state),
     showToast() {}
   }
