@@ -268,7 +268,7 @@ export const createOssSlice: StateCreator<
       }
       if (editor.status !== 'loaded' || !editor.version) return
       if (new TextEncoder().encode(editor.draft).length > MAX_TEXT_EDIT_BYTES) {
-        const error = '文本超过 2 MB，缩减内容后才能保存（按 UTF-8 字节计算）'
+        const error = '文本超过 5 MB，缩减内容后才能保存（按 UTF-8 字节计算）'
         set({ editor: { ...editor, error } })
         get().showToast(error, 'error')
         return

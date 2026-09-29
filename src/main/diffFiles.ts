@@ -135,9 +135,11 @@ export async function locateDiffFile(
   return null
 }
 
+export class TextSizeError extends Error {}
 function checkSize(size: number): void {
   if (!Number.isSafeInteger(size) || size < 0) throw new Error('文件大小无效，无法比较')
-  if (size > MAX_TEXT_DIFF_BYTES) throw new Error('文件超过 2 MB，未比较（两侧各自按字节限制）')
+  if (size > MAX_TEXT_DIFF_BYTES)
+    throw new TextSizeError('文件超过 5 MB，未比较（两侧各自按字节限制）')
 }
 
 async function collect(stream: Readable, signal: AbortSignal): Promise<Buffer> {
@@ -225,22 +227,22 @@ async function readLocal(
       bytes.length !== Number(file.stat.size)
     )
       throw new Error('本地文件在读取期间发生变化，请重新扫描')
-    return { bytes, text: textInfo(bytes, new Date(Number(file.stat.mtimeMs)).toISOString()) }
+    return { bytes, modifiedAt: new Date(Number(file.stat.mtimeMs)).toISOString() }
   } finally {
     await handle.close()
   }
 }
 
-async function readRemote(client: OSS, key: string, signal: AbortSignal) {
+async function readRemote(client: OSS, key: string, signal: AbortSignal, timeout: number) {
   checkCancelled(signal)
-  const head = await client.head(key, { timeout: 60000 })
+  const head = await client.head(key, { timeout })
   checkCancelled(signal)
   const headers = head.res.headers as Record<string, string>
   const size = Number(headers['content-length'])
   checkSize(size)
   if (!headers.etag) throw new Error('OSS 未返回有效版本，无法比较')
   const response = await client.getStream(key, {
-    timeout: 60000,
+    timeout,
     headers: {
       'If-Match': headers.etag,
       ...(size > 0 ? { Range: `bytes=0-${MAX_TEXT_DIFF_BYTES}` } : {})
@@ -257,17 +259,20 @@ async function readRemote(client: OSS, key: string, signal: AbortSignal) {
   const time = Date.parse(headers['last-modified'])
   return {
     bytes,
-    text: textInfo(bytes, Number.isFinite(time) ? new Date(time).toISOString() : null)
+    modifiedAt: Number.isFinite(time) ? new Date(time).toISOString() : null,
+    etag: headers.etag,
+    versionId: headers['x-oss-version-id'] ?? null
   }
 }
 
-export async function readDiffPair(
+export async function readDiffBytes(
   root: DiffRoot,
   client: OSS,
   key: string,
   signal: AbortSignal,
   expected?: LocalDiffFile,
-  directories = new DiffDirectoryIndex()
+  directories = new DiffDirectoryIndex(),
+  timeout = 60000
 ) {
   checkCancelled(signal)
   const local = await locateDiffFile(root, key, undefined, directories)
@@ -278,7 +283,7 @@ export async function readDiffPair(
   // 等待两端读取都结束再释放任务占用，不能让失败一侧遗留在途读取。
   const results = await Promise.allSettled([
     readLocal(root, key, local, signal, directories),
-    readRemote(client, key, signal)
+    readRemote(client, key, signal, timeout)
   ])
   checkCancelled(signal)
   const a = results[0],
@@ -286,9 +291,21 @@ export async function readDiffPair(
   if (a.status === 'rejected') throw a.reason
   if (b.status === 'rejected') throw b.reason
   await checkDiffRoot(root)
+  return { local: a.value, remote: b.value }
+}
+
+export async function readDiffPair(
+  root: DiffRoot,
+  client: OSS,
+  key: string,
+  signal: AbortSignal,
+  expected?: LocalDiffFile,
+  directories = new DiffDirectoryIndex()
+) {
+  const pair = await readDiffBytes(root, client, key, signal, expected, directories)
   return {
-    local: a.value.text,
-    remote: b.value.text,
-    identical: a.value.bytes.equals(b.value.bytes)
+    local: textInfo(pair.local.bytes, pair.local.modifiedAt),
+    remote: textInfo(pair.remote.bytes, pair.remote.modifiedAt),
+    identical: pair.local.bytes.equals(pair.remote.bytes)
   }
 }

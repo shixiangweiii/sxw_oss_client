@@ -108,7 +108,7 @@ function EditorView({ editor }: { editor: OssEditorState }): JSX.Element {
       )}
       {oversized && (
         <p role="alert" className="px-6 py-2 text-sm text-red-500">
-          当前文本超过 2 MB，缩减内容后才能保存（按 UTF-8 字节计算）。
+          当前文本超过 5 MB，缩减内容后才能保存（按 UTF-8 字节计算）。
         </p>
       )}
       {editor.status === 'loaded' && editor.error && (

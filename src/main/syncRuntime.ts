@@ -2,73 +2,119 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { IPC_CHANNELS } from '../shared/constants'
 import type { OssResult, SyncDirection } from '../shared/types'
 import { getSyncConnection, toOssError } from './oss'
-import { SyncManager, type ConfirmOverwrite } from './sync'
+import { SyncManager, type ConfirmOverwrite, type SelectDownloadMode } from './sync'
 
 let manager: SyncManager
 let pendingExit = false
 let exitDecision: { promise: Promise<void>; resume: () => void } | null = null
 let activeConfirmation: { controller: AbortController; closed: Promise<void> } | null = null
 
-function confirmationFor(win: BrowserWindow): ConfirmOverwrite {
-  return async (request, signal) => {
-    while (!signal.aborted && !win.isDestroyed()) {
-      // 退出确认期间保留当前文件，不把程序收起弹窗当成用户跳过。
-      if (exitDecision) await exitDecision.promise
-      // 此处直到登记 activeConfirmation 之间不能引入 await，以免退出确认插入其间。
-      if (signal.aborted || win.isDestroyed()) return 'cancel'
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-      const controller = new AbortController()
-      const abort = (): void => controller.abort()
-      signal.addEventListener('abort', abort, { once: true })
-      let closed!: () => void
-      const current = {
-        controller,
-        closed: new Promise<void>((resolve) => {
-          closed = resolve
-        })
-      }
-      activeConfirmation = current
-      let response: number
-      try {
-        const format = (time: number): string =>
-          new Date(time).toLocaleString('zh-CN', { hour12: false, timeZoneName: 'short' })
-        const target = request.direction === 'upload' ? '云端' : '本地'
-        const source = request.direction === 'upload' ? '本地' : '云端'
-        const result = await dialog.showMessageBox(win, {
-          type: 'warning',
-          message: `${target}文件比${source}文件更新，是否覆盖${target}文件？`,
-          detail: [
-            `文件：${request.key}`,
-            `方向：${source} → ${target}`,
-            `本地路径：${request.localPath}`,
-            `云端位置：oss://${request.bucket}/${request.key}`,
-            `本地修改时间：${format(request.localModifiedAt)}`,
-            `云端修改时间：${format(request.remoteModifiedAt)}`
-          ].join('\n'),
-          buttons: ['跳过此文件', '确认覆盖', '取消本次同步'],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true,
-          signal: controller.signal
-        })
-        response = result.response
-      } finally {
-        signal.removeEventListener('abort', abort)
-        if (activeConfirmation === current) activeConfirmation = null
-        closed()
-      }
-      // 程序收起和用户跳过可能返回同一 cancelId，必须先区分任务取消、临时收起，再解释按钮。
-      if (signal.aborted || win.isDestroyed()) return 'cancel'
-      if (controller.signal.aborted) continue
-      if (response === 0) return 'skip'
-      if (response === 1) return 'overwrite'
-      if (response === 2) return 'cancel'
-      throw new Error('无效的覆盖确认选择')
+async function confirmDialog<T extends string>(
+  win: BrowserWindow,
+  signal: AbortSignal,
+  options: Electron.MessageBoxOptions,
+  answers: readonly T[]
+): Promise<T | 'cancel'> {
+  while (!signal.aborted && !win.isDestroyed()) {
+    // 退出确认期间保留当前文件，不把程序收起弹窗当成用户跳过。
+    if (exitDecision) await exitDecision.promise
+    // 此处直到登记 activeConfirmation 之间不能引入 await，以免退出确认插入其间。
+    if (signal.aborted || win.isDestroyed()) return 'cancel'
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    const controller = new AbortController()
+    const abort = (): void => controller.abort()
+    signal.addEventListener('abort', abort, { once: true })
+    let closed!: () => void
+    const current = {
+      controller,
+      closed: new Promise<void>((resolve) => {
+        closed = resolve
+      })
     }
-    return 'cancel'
+    activeConfirmation = current
+    let response: number
+    try {
+      const result = await dialog.showMessageBox(win, {
+        ...options,
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        signal: controller.signal
+      })
+      response = result.response
+    } finally {
+      signal.removeEventListener('abort', abort)
+      if (activeConfirmation === current) activeConfirmation = null
+      closed()
+    }
+    // 程序收起和用户跳过可能返回同一 cancelId，必须先区分任务取消、临时收起，再解释按钮。
+    if (signal.aborted || win.isDestroyed()) return 'cancel'
+    if (controller.signal.aborted) continue
+    if (answers[response] !== undefined) return answers[response]
+    throw new Error('无效的同步确认选择')
   }
+  return 'cancel'
+}
+
+function confirmationFor(win: BrowserWindow): ConfirmOverwrite {
+  return (request, signal) => {
+    const format = (time: number): string =>
+      new Date(time).toLocaleString('zh-CN', { hour12: false, timeZoneName: 'short' })
+    const target = request.direction === 'upload' ? '云端' : '本地'
+    const source = request.direction === 'upload' ? '本地' : '云端'
+    return confirmDialog(
+      win,
+      signal,
+      {
+        type: 'warning',
+        message: `${target}文件比${source}文件更新，是否覆盖${target}文件？`,
+        detail: [
+          `文件：${request.key}`,
+          `方向：${source} → ${target}`,
+          `本地路径：${request.localPath}`,
+          `云端位置：oss://${request.bucket}/${request.key}`,
+          `本地修改时间：${format(request.localModifiedAt)}`,
+          `云端修改时间：${format(request.remoteModifiedAt)}`
+        ].join('\n'),
+        buttons: ['跳过此文件', '确认覆盖', '取消本次同步']
+      },
+      ['skip', 'overwrite', 'cancel'] as const
+    )
+  }
+}
+
+function modeSelectionFor(win: BrowserWindow): SelectDownloadMode {
+  return (request, signal) =>
+    confirmDialog(
+      win,
+      signal,
+      {
+        type: 'question',
+        message: '检测到文本差异或无法合并的文件，请选择同步方式',
+        detail: [
+          `Bucket：${request.bucket}`,
+          `本地目录：${request.localDir}`,
+          `可处理的文本差异：${request.different}；无法合并：${request.unavailable}；检查失败：${request.failed}`,
+          '合并文本到本地：保留双方内容并添加来源标记，需要之后手工整理；已有的不支持合并文件会跳过。',
+          '按原规则同步：使用云端内容更新本地；本地文件较新时仍逐文件询问是否覆盖。',
+          '检查失败的文件不会写入，选择仅对本次任务有效。',
+          ...(request.examples?.length
+            ? [
+                '检查文件示例：',
+                ...request.examples,
+                ...(request.diagnosticCount > request.examples.length
+                  ? [`另有 ${request.diagnosticCount - request.examples.length} 条检查记录。`]
+                  : [])
+              ]
+            : []),
+          '取消后检查记录仍保留，可在任务面板查看完整路径和原因。'
+        ].join('\n'),
+        buttons: ['取消本次同步', '合并文本到本地', '按原规则同步']
+      },
+      ['cancel', 'merge', 'original'] as const
+    )
 }
 
 /** 同步取消等待放在主进程，原窗口即使尚未收到进度事件也不能跳过保护。 */
@@ -190,13 +236,14 @@ export async function initializeSync(): Promise<void> {
     (event, direction: SyncDirection): OssResult<{ taskId: string }> => {
       try {
         if (pendingExit) throw new Error('请等待当前关闭、退出或刷新操作处理完成')
-        if (activeConfirmation) throw new Error('请等待当前覆盖确认窗口关闭')
+        if (activeConfirmation) throw new Error('请等待当前确认窗口关闭')
         const win = BrowserWindow.fromWebContents(event.sender)
         if (!win || win.isDestroyed()) throw new Error('发起同步的窗口已关闭')
         const taskId = manager.start(
           direction,
           getSyncConnection(event.sender.id),
-          confirmationFor(win)
+          confirmationFor(win),
+          modeSelectionFor(win)
         )
         const onClosed = (): void => manager.cancel(taskId)
         win.once('closed', onClosed)

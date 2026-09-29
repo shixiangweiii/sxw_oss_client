@@ -28,7 +28,8 @@
     "test:electron:sync": "npm run build && electron scripts/tests/electron-smoke.mjs --windowed"
   },
   "dependencies": {
-    "ali-oss": "^6.23.0"
+    "ali-oss": "^6.23.0",
+    "diff": "9.0.0"
   },
   "devDependencies": {
     "@types/ali-oss": "^6.23.3",

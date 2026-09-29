@@ -9,8 +9,10 @@ import OSS from 'ali-oss'
 import { createServer } from 'node:http'
 import { Readable, Writable } from 'node:stream'
 import { sourceLoader, deferred, tick } from './source-loader.mjs'
+import { EventEmitter } from 'node:events'
 
 const approve = async () => 'overwrite'
+const originalMode = async () => 'original'
 const modified = 'Wed, 01 Jan 2020 00:00:00 GMT'
 const hash = (data) => createHash('sha256').update(data).digest('hex')
 class Cloud {
@@ -99,13 +101,18 @@ async function fixture(t, objects = {}, overrides = {}) {
   }
   const read = (key) => fsp.readFile(path.join(local, key))
   const run = async (direction) => {
-    manager.start(direction, connection, approve)
+    manager.start(direction, connection, approve, originalMode)
     await manager.wait()
     return manager.getState()
   }
   const clean = async () => {
     assert.deepEqual(
-      JSON.parse(await fsp.readFile(path.join(userData, 'sync-temp-files.json'), 'utf8')),
+      JSON.parse(
+        await fsp.readFile(path.join(userData, 'sync-temp-files.json'), 'utf8').catch((error) => {
+          if (error.code === 'ENOENT') return '[]' // 预检查取消尚未创建任何临时文件。
+          throw error
+        })
+      ),
       []
     )
     async function visit(dir) {
@@ -315,7 +322,7 @@ test('取消流式下载会保留原文件、不处理下一文件、清理后�
     entered.resolve()
     return { stream }
   }
-  const taskId = f.manager.start('download', f.connection, approve)
+  const taskId = f.manager.start('download', f.connection, approve, originalMode)
   await entered.promise
   await tick()
   f.manager.cancel(taskId)
@@ -340,7 +347,7 @@ test('取消已提交的普通上传：等待请求结束，保留已成功写�
     await finish.promise
     return original(...args)
   }
-  const id = f.manager.start('upload', f.connection, approve)
+  const id = f.manager.start('upload', f.connection, approve, originalMode)
   await entered.promise
   f.manager.cancel(id)
   assert.equal(f.manager.getState().phase, 'cancelling')
@@ -361,7 +368,7 @@ test('64 MiB 使用分片上传；取消等待分片结束再清理，清理失�
   f.client.multipartGate = gate
   f.client.abortError = true
   f.client.onPart = () => entered.resolve()
-  const id = f.manager.start('upload', f.connection, approve)
+  const id = f.manager.start('upload', f.connection, approve, originalMode)
   await entered.promise
   await tick()
   f.manager.cancel(id)
@@ -381,13 +388,16 @@ test('进程级同步与在线保存原子互斥，终态后释放', async (t) =
     ops = f.load('src/main/operations.ts')
   const gate = deferred(),
     save = ops.withTextWrite(() => gate.promise)
-  assert.throws(() => f.manager.start('upload', f.connection, approve), /正在保存/)
+  assert.throws(() => f.manager.start('upload', f.connection, approve, originalMode), /正在保存/)
   gate.resolve()
   await save
   const listed = deferred()
   f.client.listV2 = () => listed.promise
-  const id = f.manager.start('upload', f.connection, approve)
-  assert.throws(() => f.manager.start('download', f.connection, approve), /同步进行中/)
+  const id = f.manager.start('upload', f.connection, approve, originalMode)
+  assert.throws(
+    () => f.manager.start('download', f.connection, approve, originalMode),
+    /同步进行中/
+  )
   await assert.rejects(
     ops.withTextWrite(async () => {}),
     /同步进行中/
@@ -451,7 +461,7 @@ test('分片成功按序合并，分片失败必须等其余在途请求结束�
       )
       completed = true
     }
-    f.manager.start('upload', f.connection, approve)
+    f.manager.start('upload', f.connection, approve, originalMode)
     if (fail) {
       await started.promise
       await tick()
@@ -690,7 +700,7 @@ test('取消时已完成上传仍计入成功，清理失败不会被取消状�
     committed = true
     return r
   }
-  const id = f.manager.start('upload', f.connection, approve)
+  const id = f.manager.start('upload', f.connection, approve, originalMode)
   await entered.promise
   f.manager.cancel(id)
   finish.resolve()
@@ -806,7 +816,7 @@ test('坏清单原样备份并恢复可用；失去清单的可疑临时目录�
       )
   )
   const restarted = new (f.load('src/main/sync.ts').SyncManager)(f.userData)
-  restarted.start('upload', f.connection, approve)
+  restarted.start('upload', f.connection, approve, originalMode)
   await restarted.wait()
   assert.equal(restarted.getState().phase, 'success')
   assert.equal(restarted.getState().skipped, 1)
@@ -976,14 +986,19 @@ for (const direction of ['upload', 'download']) {
         await setLocalTime(f, 'a', localTime + 0.8)
         f.client.modified.set('a', new Date((localTime + delta) * 1000).toUTCString())
         const prompts = []
-        f.manager.start(direction, f.connection, async (request) => {
-          prompts.push(request)
-          assert.equal(f.manager.getState().phase, 'confirming')
-          assert.equal(f.manager.getState().processed, 0)
-          assert.deepEqual(f.client.puts, [])
-          assert.equal((await f.read('a')).toString(), localContent)
-          return 'overwrite'
-        })
+        f.manager.start(
+          direction,
+          f.connection,
+          async (request) => {
+            prompts.push(request)
+            assert.equal(f.manager.getState().phase, 'confirming')
+            assert.equal(f.manager.getState().processed, 0)
+            assert.deepEqual(f.client.puts, [])
+            assert.equal((await f.read('a')).toString(), localContent)
+            return 'overwrite'
+          },
+          originalMode
+        )
         await f.manager.wait()
         const state = f.manager.getState()
         assert.equal(state.phase, 'success')
@@ -1021,10 +1036,15 @@ for (const direction of ['upload', 'download']) {
     f.client.modified.set('same', 'invalid')
     const calls = []
     const before = await fsp.stat(path.join(f.local, 'a'), { bigint: true })
-    f.manager.start(direction, f.connection, async ({ key }) => {
-      calls.push(key)
-      return key === 'a' ? 'skip' : 'overwrite'
-    })
+    f.manager.start(
+      direction,
+      f.connection,
+      async ({ key }) => {
+        calls.push(key)
+        return key === 'a' ? 'skip' : 'overwrite'
+      },
+      originalMode
+    )
     await f.manager.wait()
     const state = f.manager.getState()
     assert.deepEqual(calls, ['a', 'b'])
@@ -1060,10 +1080,15 @@ for (const direction of ['upload', 'download']) {
       }
       const entered = deferred(),
         decision = deferred()
-      const id = f.manager.start(direction, f.connection, () => {
-        entered.resolve()
-        return decision.promise
-      })
+      const id = f.manager.start(
+        direction,
+        f.connection,
+        () => {
+          entered.resolve()
+          return decision.promise
+        },
+        originalMode
+      )
       await entered.promise
       await tick()
       assert.equal(f.manager.active, true)
@@ -1089,10 +1114,15 @@ for (const direction of ['upload', 'download']) {
     f.client.modified.set('missing', undefined)
     if (direction === 'upload') await f.write('new', 'local')
     let calls = 0
-    f.manager.start(direction, f.connection, async () => {
-      calls++
-      return 'overwrite'
-    })
+    f.manager.start(
+      direction,
+      f.connection,
+      async () => {
+        calls++
+        return 'overwrite'
+      },
+      originalMode
+    )
     await f.manager.wait()
     assert.equal(calls, 0)
     assert.equal(f.manager.getState().failed, 1)
@@ -1108,11 +1138,16 @@ test('下载同大小比较只读取一次云端；确认期间目标变化不�
   const f = await fixture(t, { a: 'old' })
   await f.write('a', 'new')
   await setLocalTime(f, 'a')
-  f.manager.start('download', f.connection, async () => {
-    assert.deepEqual(f.client.gets, ['a'])
-    await f.write('a', 'edited during dialog')
-    return 'overwrite'
-  })
+  f.manager.start(
+    'download',
+    f.connection,
+    async () => {
+      assert.deepEqual(f.client.gets, ['a'])
+      await f.write('a', 'edited during dialog')
+      return 'overwrite'
+    },
+    originalMode
+  )
   await f.manager.wait()
   assert.equal(f.manager.getState().failed, 1)
   assert.equal((await f.read('a')).toString(), 'edited during dialog')
@@ -1124,10 +1159,15 @@ test('确认框取消及确认异常均保留目标，取消不计为跳过', as
   for (const answer of ['cancel', 'invalid', 'throw']) {
     const f = await fixture(t, { a: 'old' })
     await f.write('a', 'new')
-    f.manager.start('download', f.connection, async () => {
-      if (answer === 'throw') throw new Error('弹窗失败')
-      return answer
-    })
+    f.manager.start(
+      'download',
+      f.connection,
+      async () => {
+        if (answer === 'throw') throw new Error('弹窗失败')
+        return answer
+      },
+      originalMode
+    )
     await f.manager.wait()
     assert.equal(f.manager.getState().phase, answer === 'cancel' ? 'cancelled' : 'partial')
     assert.equal(f.manager.getState().skipped, 0)
@@ -1148,14 +1188,479 @@ test('较新的云端大文件必须确认后才初始化分片；跳过不提�
       inits++
       return { uploadId: 'id' }
     }
-    f.manager.start('upload', f.connection, async () => {
-      assert.equal(inits, 0)
-      assert.equal(f.client.parts, undefined)
-      return answer
-    })
+    f.manager.start(
+      'upload',
+      f.connection,
+      async () => {
+        assert.equal(inits, 0)
+        assert.equal(f.client.parts, undefined)
+        return answer
+      },
+      originalMode
+    )
     await f.manager.wait()
     assert.equal(inits, answer === 'skip' ? 0 : 1)
     assert.equal(f.manager.getState()[answer === 'skip' ? 'skipped' : 'overwritten'], 1)
     await f.clean()
   }
+})
+
+test('下载先检查再选择：确认前不新增文件，合并保留双方与权限并使 Diff 过期', async (t) => {
+  const f = await fixture(t, {
+    'a.txt': '开头\n云端\n结尾\n',
+    'new/deep.txt': '新增',
+    'data.bin': 'cloud',
+    'same.txt': 'same'
+  })
+  await f.write('a.txt', '\uFEFF开头\r\n本地\r\n结尾\r\n')
+  await fsp.chmod(path.join(f.local, 'a.txt'), 0o640)
+  await f.write('data.bin', 'local')
+  await f.write('same.txt', 'same')
+  const stamp = (await fsp.stat(path.join(f.local, 'same.txt'), { bigint: true })).mtimeNs
+  const changed = []
+  f.load('src/main/operations.ts').subscribeContentChanges((bucket) => changed.push(bucket))
+  let choices = 0
+  f.manager.start(
+    'download',
+    f.connection,
+    () => assert.fail('合并不应询问覆盖'),
+    async (summary) => {
+      choices++
+      assert.equal(f.manager.getState().phase, 'choosing')
+      assert.equal(f.manager.active, true)
+      assert.equal(summary.checked, summary.total)
+      assert.equal(summary.different, 1)
+      await assert.rejects(fsp.stat(path.join(f.local, 'new')), { code: 'ENOENT' })
+      assert.deepEqual(await fsp.readdir(f.local), ['a.txt', 'data.bin', 'same.txt'])
+      assert.throws(() => f.load('src/main/operations.ts').reserveDiff(), /同步/)
+      return 'merge'
+    }
+  )
+  await f.manager.wait()
+  const state = f.manager.getState()
+  assert.equal(choices, 1)
+  assert.equal(state.phase, 'success', JSON.stringify(f.manager.getIssues(state.taskId, 0)))
+  assert.equal(state.merged, 1)
+  assert.equal(state.created, 1)
+  assert.equal(state.skipped, 1)
+  assert.equal(state.unchanged, 1)
+  assert.match((await f.read('a.txt')).toString(), /本地\r\n======= OSS-CLIENT\r\n云端/)
+  assert.ok((await f.read('a.txt')).toString().startsWith('\uFEFF'))
+  assert.equal((await fsp.stat(path.join(f.local, 'a.txt'))).mode & 0o777, 0o640)
+  assert.equal((await f.read('data.bin')).toString(), 'local')
+  assert.equal((await fsp.stat(path.join(f.local, 'same.txt'), { bigint: true })).mtimeNs, stamp)
+  assert.equal(f.client.gets.filter((key) => key === 'a.txt').length, 1)
+  assert.deepEqual(changed, ['test-bucket'])
+  assert.equal(
+    f.manager
+      .getIssues(state.taskId, 0)
+      .items.some(
+        (i) =>
+          i.kind === 'merge' && i.path === 'a.txt' && i.localPath === path.join(f.local, 'a.txt')
+      ),
+    true
+  )
+  await f.clean()
+})
+
+test('只有超限或无效文本仍选择模式，合并模式跳过；纯格式保留本地', async (t) => {
+  for (const remote of [
+    Buffer.alloc(5 * 1024 * 1024 + 1, 97),
+    Buffer.from([255]),
+    '======= OSS-CLIENT\n'
+  ]) {
+    const f = await fixture(t, { 'a.txt': remote })
+    await f.write('a.txt', 'local')
+    let choices = 0
+    f.manager.start('download', f.connection, approve, async (summary) => {
+      choices++
+      assert.equal(summary.unavailable, 1)
+      assert.equal(summary.different, 0)
+      assert.equal(summary.failed, 0)
+      return 'merge'
+    })
+    await f.manager.wait()
+    assert.equal(choices, 1)
+    assert.equal(f.manager.getState().skipped, 1)
+    assert.equal((await f.read('a.txt')).toString(), 'local')
+  }
+  const f = await fixture(t, { 'a.txt': '内容\n' })
+  await f.write('a.txt', '\uFEFF内容\r\n')
+  const before = (await fsp.stat(path.join(f.local, 'a.txt'), { bigint: true })).mtimeNs
+  f.manager.start('download', f.connection, approve, async () => 'merge')
+  await f.manager.wait()
+  assert.equal(f.manager.getState().skipped, 1)
+  assert.equal((await f.read('a.txt')).toString(), '\uFEFF内容\r\n')
+  assert.equal((await fsp.stat(path.join(f.local, 'a.txt'), { bigint: true })).mtimeNs, before)
+})
+
+test('模式选择取消或迟到决定均不写入；原规则保留逐文件覆盖确认并复用预检内容', async (t) => {
+  const f = await fixture(t, { 'a.txt': 'old', 'new.txt': 'new' })
+  await f.write('a.txt', 'now')
+  const entered = deferred(),
+    decision = deferred()
+  const id = f.manager.start('download', f.connection, approve, () => {
+    entered.resolve()
+    return decision.promise
+  })
+  await entered.promise
+  f.manager.cancel(id)
+  await f.manager.wait()
+  decision.resolve('merge')
+  await tick()
+  assert.equal((await f.read('a.txt')).toString(), 'now')
+  await assert.rejects(f.read('new.txt'), { code: 'ENOENT' })
+  let confirms = 0
+  f.manager.start(
+    'download',
+    f.connection,
+    async () => {
+      confirms++
+      return 'overwrite'
+    },
+    originalMode
+  )
+  await f.manager.wait()
+  assert.equal(confirms, 1)
+  assert.equal(f.manager.getState().overwritten, 1)
+  assert.equal(f.client.gets.filter((key) => key === 'a.txt').length, 2)
+  assert.equal((await f.read('a.txt')).toString(), 'old')
+})
+
+test('预检查后本地、云端或缺失目标变化均保留当前文件；失败项不能被原同步重试写入', async (t) => {
+  for (const mode of ['merge', 'original'])
+    for (const side of ['local', 'remote', 'missing']) {
+      const f = await fixture(t, { 'a.txt': 'remote', 'new.txt': 'new' })
+      await f.write('a.txt', 'local')
+      f.manager.start('download', f.connection, approve, async () => {
+        if (side === 'local') await f.write('a.txt', 'edited')
+        if (side === 'remote') f.client.objects.set('a.txt', Buffer.from('changed'))
+        if (side === 'missing') await f.write('new.txt', 'appeared')
+        return mode
+      })
+      await f.manager.wait()
+      assert.equal(f.manager.getState().failed, 1)
+      if (side === 'missing') assert.equal((await f.read('new.txt')).toString(), 'appeared')
+      else assert.equal((await f.read('a.txt')).toString(), side === 'local' ? 'edited' : 'local')
+    }
+  const f = await fixture(t, { 'a.txt': 'remote', 'b.txt': 'new' })
+  await f.write('a.txt', 'local')
+  f.client.getStream = async () => {
+    throw Object.assign(new Error('读取失败'), { requestId: 'test-request' })
+  }
+  f.manager.start('download', f.connection, approve, async (summary) => {
+    assert.equal(summary.failed, 1)
+    return 'original'
+  })
+  await f.manager.wait()
+  assert.equal((await f.read('a.txt')).toString(), 'local')
+  assert.equal(
+    f.manager
+      .getIssues(f.manager.getState().taskId, 0)
+      .items.some((i) => i.requestId === 'test-request'),
+    true
+  )
+})
+
+test('合并结果超限不写入；上传标记在普通及分片请求前拦截', async (t) => {
+  const f = await fixture(t, { 'a.txt': 'r'.repeat(3 * 1024 * 1024) })
+  await f.write('a.txt', 'l'.repeat(3 * 1024 * 1024))
+  f.manager.start('download', f.connection, approve, async () => 'merge')
+  await f.manager.wait()
+  assert.equal(f.manager.getState().skipped, 1)
+  assert.equal((await f.read('a.txt'))[0], 108)
+  for (const size of [100, 64 * 1024 * 1024]) {
+    const g = await fixture(t)
+    await g.write('a.txt', '<<<<<<< OSS-CLIENT 本地\n')
+    await fsp.truncate(path.join(g.local, 'a.txt'), size)
+    let inits = 0
+    g.client.initMultipartUpload = async () => {
+      inits++
+      throw new Error('不应初始化分片')
+    }
+    const state = await g.run('upload')
+    assert.equal(state.skipped, 1)
+    assert.deepEqual(g.client.puts, [])
+    assert.equal(inits, 0)
+  }
+})
+
+test('预检查及合并计算取消后等待在途工作，不提前解锁或写入', async (t) => {
+  for (const stage of ['prechecking', 'merging']) {
+    const entered = deferred(),
+      finish = deferred()
+    const overrides =
+      stage === 'merging'
+        ? {
+            worker_threads: {
+              Worker: class extends EventEmitter {
+                constructor() {
+                  super()
+                  entered.resolve()
+                }
+                terminate() {
+                  return finish.promise.then(() => {
+                    this.emit('exit', 1)
+                    return 1
+                  })
+                }
+              }
+            }
+          }
+        : {}
+    const f = await fixture(t, { 'a.txt': 'cloud' }, overrides)
+    await f.write('a.txt', 'local')
+    if (stage === 'prechecking') {
+      const originalHead = f.client.head.bind(f.client)
+      f.client.head = async (...args) => {
+        entered.resolve()
+        await finish.promise
+        return originalHead(...args)
+      }
+    }
+    const id = f.manager.start('download', f.connection, approve, async () => 'merge')
+    await entered.promise
+    assert.equal(f.manager.getState().phase, stage)
+    f.manager.cancel(id)
+    await tick()
+    assert.equal(f.manager.active, true)
+    assert.throws(() => f.load('src/main/operations.ts').reserveDiff(), /同步/)
+    assert.equal((await f.read('a.txt')).toString(), 'local')
+    finish.resolve()
+    await f.manager.wait()
+    assert.equal(f.manager.getState().phase, 'cancelled')
+    assert.equal(f.manager.getState().merged, 0)
+    assert.equal((await f.read('a.txt')).toString(), 'local')
+    await f.clean()
+  }
+})
+
+test('合并成功但临时清理失败仍计为合并，任务显示部分失败', async (t) => {
+  const f = await fixture(t, { 'a.txt': 'cloud' })
+  await f.write('a.txt', 'local')
+  const temps = f.manager.temps
+  const originalRemove = temps.remove.bind(temps)
+  temps.remove = async (dir) => {
+    if ((await f.read('a.txt')).includes(Buffer.from('<<<<<<< OSS-CLIENT')))
+      throw new Error('模拟合并后清理失败')
+    return originalRemove(dir)
+  }
+  f.manager.start('download', f.connection, approve, async () => 'merge')
+  await f.manager.wait()
+  const state = f.manager.getState()
+  assert.equal(state.merged, 1)
+  assert.equal(state.failed, 0)
+  assert.equal(state.phase, 'partial')
+  assert.ok(f.manager.getIssues(state.taskId, 0).items.some((i) => i.phase === 'cleanup'))
+  temps.remove = originalRemove
+  await temps.recover()
+  await f.clean()
+})
+
+test('预检查缓存按原始字节 LRU 淘汰；重读必须匹配最初版本', async (t) => {
+  const f = await fixture(t, { 'a.txt': 'remote' })
+  await f.write('a.txt', 'local')
+  const { TextPairCache, DownloadPrecheck } = f.load('src/main/syncPrecheck.ts')
+  const pair = (value) => ({
+    local: { bytes: Buffer.from(value) },
+    remote: { bytes: Buffer.from(value) }
+  })
+  const cache = new TextPairCache(8)
+  cache.set('a', pair('aa'))
+  cache.set('b', pair('bb'))
+  cache.get('a')
+  cache.set('c', pair('cc'))
+  assert.equal(cache.get('b'), undefined)
+  assert.ok(cache.get('a'))
+  cache.set('huge', pair('12345'))
+  assert.equal(cache.get('huge'), undefined)
+  cache.clear()
+  assert.equal(cache.get('a'), undefined)
+  const precheck = new DownloadPrecheck(
+    f.local,
+    await fsp.stat(f.local, { bigint: true }),
+    f.client,
+    1
+  )
+  const signal = new AbortController().signal
+  await precheck.inspect(
+    { key: 'a.txt', size: 6, etag: f.client.info('a.txt').etag, kind: 'file' },
+    signal
+  )
+  const record = precheck.checks.get('a.txt')
+  precheck.cache.clear()
+  assert.equal((await precheck.pair('a.txt', record, signal)).remote.bytes.toString(), 'remote')
+  precheck.cache.clear()
+  f.client.objects.set('a.txt', Buffer.from('changed'))
+  await assert.rejects(precheck.pair('a.txt', record, signal), /云端文件.*变化/)
+  precheck.clear()
+})
+
+test('same 文件在等待选择时云端更新、删除或版本号改变，两种模式均记录失败', async (t) => {
+  for (const mode of ['original', 'merge'])
+    for (const change of ['update', 'delete', 'version']) {
+      const f = await fixture(t, { 'a.txt': 'same', 'b.txt': 'cloud' })
+      await f.write('a.txt', 'same')
+      await f.write('b.txt', 'local')
+      let version = 'v1'
+      const info = f.client.info.bind(f.client)
+      f.client.info = (key) => ({ ...info(key), 'x-oss-version-id': version })
+      f.manager.start('download', f.connection, approve, async () => {
+        if (change === 'update') f.client.objects.set('a.txt', Buffer.from('changed'))
+        if (change === 'delete') f.client.objects.delete('a.txt')
+        if (change === 'version') {
+          const previous = f.client.info
+          f.client.info = (key) => ({
+            ...previous(key),
+            'x-oss-version-id': key === 'a.txt' ? 'v2' : version
+          })
+        }
+        return mode
+      })
+      await f.manager.wait()
+      const state = f.manager.getState()
+      assert.equal(state.failed, 1, `${mode}/${change}`)
+      assert.equal(state.unchanged, 0)
+      assert.equal(state.phase, 'partial')
+      assert.equal((await f.read('a.txt')).toString(), 'same')
+      assert.ok(
+        f.manager
+          .getIssues(state.taskId, 0)
+          .items.some((item) => item.path === 'a.txt' && item.kind === 'error')
+      )
+      assert.equal(
+        f.client.gets.filter((key) => key === 'a.txt').length,
+        1,
+        '执行只补 HEAD，不重复 GET'
+      )
+    }
+})
+
+test('合并模式把目录标记与本地普通文件冲突分类为跳过，不读取目录正文', async (t) => {
+  const f = await fixture(t, { 'foo/': '', 'b.txt': 'cloud' })
+  await f.write('foo', 'keep')
+  await f.write('b.txt', 'local')
+  f.manager.start('download', f.connection, approve, async () => 'merge')
+  await f.manager.wait()
+  const state = f.manager.getState()
+  assert.equal(state.skipped, 1)
+  assert.equal(state.failed, 0)
+  assert.equal(state.merged, 1)
+  assert.equal((await f.read('foo')).toString(), 'keep')
+  assert.equal(f.client.gets.includes('foo/'), false)
+  const issue = f.manager.getIssues(state.taskId, 0).items.find((item) => item.path === 'foo/')
+  assert.equal(issue.kind, 'skip')
+  assert.match(issue.message, /文件与目录同名冲突/)
+})
+
+test('预检详情在选择前和取消后保留路径及 requestId，执行时更新同一记录', async (t) => {
+  for (const choice of ['cancel', 'original', 'merge']) {
+    const f = await fixture(t, { 'bad.txt': Buffer.from([255]), 'fail.txt': 'cloud' })
+    await f.write('bad.txt', 'local')
+    await f.write('fail.txt', 'local')
+    const get = f.client.getStream.bind(f.client)
+    f.client.getStream = (key, options) =>
+      key === 'fail.txt'
+        ? Promise.reject(Object.assign(new Error('fixture denied'), { requestId: 'fixture-rid' }))
+        : get(key, options)
+    let beforeRevision = 0
+    f.manager.start('download', f.connection, approve, async (summary) => {
+      const state = f.manager.getState()
+      beforeRevision = state.issueRevision
+      const issues = f.manager.getIssues(state.taskId, 0).items
+      assert.equal(issues.length, 2)
+      assert.ok(
+        issues.every(
+          (item) =>
+            item.kind === 'check' &&
+            item.phase === 'prechecking' &&
+            item.localPath === path.join(f.local, item.path)
+        )
+      )
+      assert.equal(issues.find((item) => item.path === 'fail.txt').requestId, 'fixture-rid')
+      assert.equal(summary.different, 0)
+      assert.equal(summary.unavailable, 1)
+      assert.equal(summary.failed, 1)
+      assert.equal(summary.examples.length, 2)
+      return choice
+    })
+    await f.manager.wait()
+    const state = f.manager.getState(),
+      issues = f.manager.getIssues(state.taskId, 0).items
+    assert.equal(issues.length, 2, '更新检查记录，不重复追加执行错误')
+    const failure = issues.find((item) => item.path === 'fail.txt')
+    assert.equal(failure.requestId, 'fixture-rid')
+    assert.equal(failure.phase, 'prechecking')
+    if (choice === 'cancel') assert.equal(failure.kind, 'check')
+    else {
+      assert.equal(failure.kind, 'error')
+      assert.ok(state.issueRevision > beforeRevision)
+    }
+    if (choice === 'original') {
+      const record = issues.find((item) => item.path === 'bad.txt')
+      assert.equal(record.kind, 'check')
+      assert.match(record.message, /执行结果：已按原规则覆盖/)
+      assert.equal(state.overwritten, 1)
+      assert.equal(state.skipped, 0)
+    }
+    if (choice === 'merge')
+      assert.equal(issues.find((item) => item.path === 'bad.txt').kind, 'skip')
+  }
+})
+
+test('预检查最多三对并发，取消等待全部在途读取结束且不启动后续文件', async (t) => {
+  const objects = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`${i}.txt`, 'cloud']))
+  const f = await fixture(t, objects)
+  for (const key of Object.keys(objects)) await f.write(key, 'local')
+  const entered = deferred(),
+    release = deferred()
+  const head = f.client.head.bind(f.client)
+  let active = 0,
+    peak = 0,
+    calls = 0
+  f.client.head = async (...args) => {
+    calls++
+    active++
+    peak = Math.max(peak, active)
+    if (active === 3) entered.resolve()
+    try {
+      await release.promise
+      return await head(...args)
+    } finally {
+      active--
+    }
+  }
+  const id = f.manager.start('download', f.connection, approve, async () =>
+    assert.fail('取消不进入模式选择')
+  )
+  await entered.promise
+  f.manager.cancel(id)
+  await tick()
+  assert.equal(f.manager.active, true)
+  assert.equal(active, 3)
+  assert.throws(() => f.load('src/main/operations.ts').reserveDiff(), /同步/)
+  release.resolve()
+  await f.manager.wait()
+  assert.equal(peak, 3)
+  assert.equal(calls, 3)
+  assert.equal(active, 0)
+  assert.equal(f.manager.getState().phase, 'cancelled')
+  assert.equal((await f.read('0.txt')).toString(), 'local')
+})
+
+test('普通下载等待覆盖确认时云端变化，最终 HEAD 仍阻止提交旧内容', async (t) => {
+  const f = await fixture(t, { a: 'cloud' })
+  await f.write('a', 'local')
+  f.manager.start(
+    'download',
+    f.connection,
+    async () => {
+      f.client.objects.set('a', Buffer.from('newer'))
+      return 'overwrite'
+    },
+    originalMode
+  )
+  await f.manager.wait()
+  assert.equal(f.manager.getState().failed, 1)
+  assert.equal((await f.read('a')).toString(), 'local')
 })

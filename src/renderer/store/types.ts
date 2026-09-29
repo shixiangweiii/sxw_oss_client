@@ -142,5 +142,5 @@ export interface SyncSlice {
   applySyncState: (state: SyncState) => void
   startSync: (direction: SyncDirection) => Promise<void>
   cancelSync: () => Promise<void>
-  loadSyncIssues: () => Promise<void>
+  loadSyncIssues: (reload?: boolean) => Promise<void>
 }

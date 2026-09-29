@@ -135,17 +135,17 @@ test('保存前已发生的外部修改被检测，草稿不会覆盖对象', as
   assert.equal(s.text, 'external')
 })
 
-test('服务端边界接受恰好 2 MB，拒绝多一个字节，并可再次打开', async () => {
+test('服务端边界接受恰好 5 MB，拒绝多一个字节，并可再次打开', async () => {
   const s = service()
   s.config()
   s.api.getDefaultBucket(1)
   const read = await s.api.getObjectText(1, 'one', 'a.txt')
   await assert.rejects(
-    s.api.putObjectText(1, 'one', 'a.txt', 'x'.repeat(2097153), read.version),
-    /2 MB/
+    s.api.putObjectText(1, 'one', 'a.txt', 'x'.repeat(5242881), read.version),
+    /5 MB/
   )
   assert.equal(s.putCount, 0)
-  const saved = await s.api.putObjectText(1, 'one', 'a.txt', 'x'.repeat(2097152), read.version)
-  assert.equal(saved.size, 2097152)
-  assert.equal((await s.api.getObjectText(1, 'one', 'a.txt')).size, 2097152)
+  const saved = await s.api.putObjectText(1, 'one', 'a.txt', 'x'.repeat(5242880), read.version)
+  assert.equal(saved.size, 5242880)
+  assert.equal((await s.api.getObjectText(1, 'one', 'a.txt')).size, 5242880)
 })

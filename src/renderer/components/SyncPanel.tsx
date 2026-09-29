@@ -1,9 +1,13 @@
+import { useEffect, useRef } from 'react'
 import { useStore } from '../store'
 import { isSyncActive } from '../../shared/constants'
 import type { SyncPhase } from '../../shared/types'
 
 const labels: Record<SyncPhase, string> = {
   scanning: '扫描中',
+  prechecking: '检查本地文本差异',
+  choosing: '等待选择同步方式',
+  merging: '合并文本中',
   comparing: '比较内容',
   confirming: '等待覆盖确认',
   transferring: '传输中',
@@ -15,6 +19,9 @@ const labels: Record<SyncPhase, string> = {
 }
 const issueStages: Record<string, string> = {
   scanning: '扫描',
+  prechecking: '预检查',
+  choosing: '模式选择',
+  merging: '文本合并',
   comparing: '比较',
   confirming: '覆盖确认',
   transferring: '传输',
@@ -27,6 +34,10 @@ export function SyncPanel(): JSX.Element | null {
   const issues = useStore((s) => s.syncIssues)
   const cancel = useStore((s) => s.cancelSync)
   const loadIssues = useStore((s) => s.loadSyncIssues)
+  const detailsRef = useRef<HTMLDetailsElement>(null)
+  useEffect(() => {
+    if (detailsRef.current?.open) void loadIssues(true)
+  }, [state?.taskId, state?.issueRevision, loadIssues])
   if (!state && !error) return null
   return (
     <section
@@ -42,7 +53,13 @@ export function SyncPanel(): JSX.Element | null {
         <>
           <div className="flex items-center justify-between gap-2">
             <strong>
-              {state.direction === 'download' ? '同步到本地' : '同步到云端'} · {labels[state.phase]}
+              {state.direction === 'download'
+                ? state.downloadMode === 'merge'
+                  ? '合并文本到本地'
+                  : '同步到本地'
+                : '同步到云端'}{' '}
+              · {labels[state.phase]}
+              {state.merged > 0 && ' · 含待整理文件'}
             </strong>
             {isSyncActive(state.phase) && (
               <button
@@ -62,9 +79,22 @@ export function SyncPanel(): JSX.Element | null {
             {state.total === null
               ? `已发现 ${state.discovered} 项`
               : `已处理 ${state.processed} / ${state.total} 项`}{' '}
-            · 新增 {state.created} · 覆盖 {state.overwritten} · 内容相同 {state.unchanged} · 已跳过{' '}
-            {state.skipped} · 失败 {state.failed}
+            · 新增 {state.created} · 覆盖 {state.overwritten} · 合并待整理 {state.merged} · 内容相同{' '}
+            {state.unchanged} · 已跳过 {state.skipped} · 失败 {state.failed}
           </p>
+          {state.precheck && (state.phase === 'prechecking' || state.phase === 'choosing') && (
+            <div role="status" className="mt-1">
+              已检查 {state.precheck.checked} / {state.precheck.total} 项 · 可处理的文本差异{' '}
+              {state.precheck.different} · 无法合并 {state.precheck.unavailable} · 检查失败{' '}
+              {state.precheck.failed}
+              <progress
+                aria-label="预检查进度"
+                className="mt-1 w-full"
+                value={state.precheck.checked}
+                max={Math.max(1, state.precheck.total)}
+              />
+            </div>
+          )}
           {state.total !== null && (
             <progress
               aria-label="同步进度"
@@ -81,17 +111,20 @@ export function SyncPanel(): JSX.Element | null {
           {state.message && <p className="mt-1">{state.message}</p>}
           {state.issueCount > 0 && (
             <details
+              ref={detailsRef}
               className="mt-1"
               onToggle={(e) => {
                 if (e.currentTarget.open && !issues.length) void loadIssues()
               }}
             >
-              <summary className="cursor-pointer">查看失败与跳过详情（{state.issueCount}）</summary>
+              <summary className="cursor-pointer">
+                查看检查记录与处理详情（{state.issueCount}）
+              </summary>
               <ul className="mt-1 space-y-1">
                 {issues.map((issue, index) => (
                   <li key={index} className="break-all">
-                    {issue.path || '任务'} · {issueStages[issue.phase] ?? issue.phase} ·{' '}
-                    {issue.message}
+                    {issue.localPath ?? (issue.path || '任务')} ·{' '}
+                    {issueStages[issue.phase] ?? issue.phase} · {issue.message}
                     {issue.requestId ? `（requestId: ${issue.requestId}）` : ''}
                   </li>
                 ))}

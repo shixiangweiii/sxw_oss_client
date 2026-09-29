@@ -49,7 +49,11 @@ export async function maybeStat(path: string) {
     throw err
   }
 }
-export async function prepareRoot(path: string, create: boolean): Promise<string> {
+export async function prepareRoot(
+  path: string,
+  create: boolean,
+  allowMissing = false
+): Promise<string> {
   if (!isAbsolute(path)) throw new Error('同步目录必须是绝对路径')
   const absolute = resolve(path)
   let parent = parse(absolute).root
@@ -58,9 +62,11 @@ export async function prepareRoot(path: string, create: boolean): Promise<string
     const current = await maybeStat(parent)
     if (current?.isSymbolicLink()) throw new Error('同步目录路径不能经过符号链接')
     if (!current && create) await mkdir(parent)
-    else if (!current || !current.isDirectory()) throw new Error('同步根目录不存在或不是普通目录')
+    else if ((!current && !allowMissing) || (current && !current.isDirectory()))
+      throw new Error('同步根目录不存在或不是普通目录')
   }
   const stat = await maybeStat(path)
+  if (!stat && allowMissing && !create) return absolute
   if (!stat?.isDirectory() || stat.isSymbolicLink())
     throw new Error('同步根目录不存在或不是普通目录')
   await access(path, constants.R_OK | (create ? constants.W_OK : 0))
@@ -68,7 +74,12 @@ export async function prepareRoot(path: string, create: boolean): Promise<string
 }
 
 /** 每个路径分量单独校验，不让 mkdir/rename 穿过目标目录中的符号链接。 */
-export async function safePath(root: string, key: string, makeParents = false): Promise<string> {
+export async function safePath(
+  root: string,
+  key: string,
+  makeParents = false,
+  allowMissing = false
+): Promise<string> {
   const parts = validateKey(key)
   const rootStat = await lstat(root)
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new SyncSkip('同步根目录已被替换')
@@ -86,8 +97,8 @@ export async function safePath(root: string, key: string, makeParents = false): 
       if (stat.isSymbolicLink()) throw new SyncSkip('跳过符号链接')
       if (i < parts.length - 1 && !stat.isDirectory()) throw new SyncSkip('文件与目录同名冲突')
     } else if (i < parts.length - 1) {
-      if (!makeParents) throw new Error('来源目录已被删除')
-      await mkdir(next)
+      if (!makeParents && !allowMissing) throw new Error('来源目录已被删除')
+      if (makeParents) await mkdir(next)
     }
     current = next
   }

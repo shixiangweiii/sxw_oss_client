@@ -240,7 +240,7 @@ export function OssPanel(): JSX.Element {
               syncConfigError ??
               (busy
                 ? '请等待当前同步、保存或 Diff 读取结束'
-                : '比较本地与云端的文本内容（两侧各不超过 2 MB）')
+                : '比较本地与云端的文本内容（两侧各不超过 5 MB）')
             }
             onClick={() => void startDiff()}
             className="rounded border border-blue-600 px-3 py-1 text-xs text-blue-600 disabled:opacity-40 dark:text-blue-400"

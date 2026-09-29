@@ -11,7 +11,7 @@ async function until(check) {
   assert.fail('等待运行时确认超时')
 }
 
-async function runtime() {
+async function runtime(modeSelection = false) {
   const handlers = new Map(),
     events = new Map(),
     boxes = [],
@@ -90,18 +90,22 @@ async function runtime() {
     getIssues() {
       return { items: [], total: 0 }
     }
-    start(direction, _connection, confirm) {
+    start(direction, _connection, confirm, selectMode) {
       assert.equal(this.active, false)
       this.active = true
       this.signal = new AbortController()
-      this.state = { taskId: 'task', phase: 'confirming', issueCount: 0 }
+      this.state = {
+        taskId: 'task',
+        phase: modeSelection ? 'choosing' : 'confirming',
+        issueCount: 0
+      }
       this.finished = Promise.resolve().then(async () => {
         const cancelled = new Promise((resolve) =>
           this.signal.signal.addEventListener('abort', () => resolve('cancel'), { once: true })
         )
         this.answer = await Promise.race([
           cancelled,
-          confirm(
+          (modeSelection ? selectMode : confirm)(
             {
               taskId: 'task',
               direction,
@@ -109,7 +113,13 @@ async function runtime() {
               key: 'folder/a.txt',
               localPath: '/test/folder/a.txt',
               localModifiedAt: 1704067200000,
-              remoteModifiedAt: 1704067210000
+              remoteModifiedAt: 1704067210000,
+              localDir: '/test',
+              checked: 5,
+              total: 5,
+              different: 2,
+              unavailable: 1,
+              failed: 1
             },
             this.signal.signal
           )
@@ -214,51 +224,83 @@ for (const [response, result] of [
   )
 }
 
-for (const operation of ['close', 'quit', 'reload']) {
-  test(
-    `等待覆盖确认时 ${operation}：继续恢复同一文件，取消后才执行窗口操作`,
-    { timeout: 5000 },
-    async () => {
-      const f = await runtime()
-      f.start()
-      await until(() => f.boxes.length === 1)
-      const act = () => {
-        if (operation === 'close') f.first.close()
-        else if (operation === 'quit') f.app.quit()
-        else assert.equal(f.reload(), false)
+for (const modeSelection of [false, true])
+  for (const operation of ['close', 'quit', 'reload']) {
+    test(
+      `等待${modeSelection ? '模式选择' : '覆盖确认'}时 ${operation}：继续恢复同一请求，取消后才执行窗口操作`,
+      { timeout: 5000 },
+      async () => {
+        const f = await runtime(modeSelection)
+        f.start()
+        await until(() => f.boxes.length === 1)
+        const act = () => {
+          if (operation === 'close') f.first.close()
+          else if (operation === 'quit') f.app.quit()
+          else assert.equal(f.reload(), false)
+        }
+        act()
+        await until(() => f.boxes.length === 2)
+        assert.equal(f.boxes[0].closed, true)
+        assert.equal(f.boxes[1].options.detail, f.boxes[0].options.detail)
+        assert.equal(f.manager.active, true)
+        assert.equal(f.first.destroyed, false)
+        f.exitAnswer(1)
+        act()
+        await f.manager.wait()
+        await until(() =>
+          operation === 'close'
+            ? f.first.destroyed
+            : operation === 'quit'
+              ? f.exits() === 1
+              : f.first.reloads === 1
+        )
+        assert.equal(f.manager.state.phase, 'cancelled')
+        assert.equal(f.boxes.length, 2)
+        assert.ok(f.boxes.every((box) => box.closed))
       }
-      act()
-      await until(() => f.boxes.length === 2)
-      assert.equal(f.boxes[0].closed, true)
-      assert.equal(f.boxes[1].options.detail, f.boxes[0].options.detail)
-      assert.equal(f.manager.active, true)
-      assert.equal(f.first.destroyed, false)
-      f.exitAnswer(1)
-      act()
-      await f.manager.wait()
-      await until(() =>
-        operation === 'close'
-          ? f.first.destroyed
-          : operation === 'quit'
-            ? f.exits() === 1
-            : f.first.reloads === 1
-      )
-      assert.equal(f.manager.state.phase, 'cancelled')
-      assert.equal(f.boxes.length, 2)
-      assert.ok(f.boxes.every((box) => box.closed))
-    }
-  )
-}
+    )
+  }
 
-for (const operation of ['cancel', 'destroy']) {
-  test(`等待覆盖确认时 ${operation}：终止原生弹窗等待`, { timeout: 5000 }, async () => {
-    const f = await runtime()
-    f.start()
+for (const modeSelection of [false, true])
+  for (const operation of ['cancel', 'destroy']) {
+    test(
+      `等待${modeSelection ? '模式选择' : '覆盖确认'}时 ${operation}：终止原生弹窗等待`,
+      { timeout: 5000 },
+      async () => {
+        const f = await runtime(modeSelection)
+        f.start()
+        await until(() => f.boxes.length === 1)
+        if (operation === 'cancel') f.cancel()
+        else f.first.destroy()
+        await f.manager.wait()
+        assert.equal(f.manager.state.phase, 'cancelled')
+        assert.equal(f.boxes[0].closed, true)
+      }
+    )
+  }
+
+for (const [response, result] of [
+  [0, 'cancel'],
+  [1, 'merge'],
+  [2, 'original']
+]) {
+  test(`原生模式选择 ${result}：默认与 Esc 取消，显示检查统计并绑定发起窗口`, async () => {
+    const f = await runtime(true)
+    assert.equal(f.start().ok, true)
     await until(() => f.boxes.length === 1)
-    if (operation === 'cancel') f.cancel()
-    else f.first.destroy()
+    const box = f.boxes[0]
+    assert.equal(box.win, f.first)
+    assert.deepEqual(Array.from(box.options.buttons), [
+      '取消本次同步',
+      '合并文本到本地',
+      '按原规则同步'
+    ])
+    assert.equal(box.options.defaultId, 0)
+    assert.equal(box.options.cancelId, 0)
+    assert.match(box.options.detail, /可处理的文本差异：2；无法合并：1；检查失败：1/)
+    assert.equal(f.start().ok, false)
+    box.gate.resolve({ response })
     await f.manager.wait()
-    assert.equal(f.manager.state.phase, 'cancelled')
-    assert.equal(f.boxes[0].closed, true)
+    assert.equal(f.manager.answer, result)
   })
 }

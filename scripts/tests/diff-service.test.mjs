@@ -10,7 +10,7 @@ import OSS from 'ali-oss'
 import { sourceLoader, deferred, tick } from './source-loader.mjs'
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex')
-const limit = 2 * 1024 * 1024
+const limit = 5 * 1024 * 1024
 async function until(check) {
   for (let i = 0; i < 300; i++) {
     if (check()) return
@@ -127,7 +127,7 @@ test('完整分页扫描只列两端文本差异；时间不参与判断，深�
   )
 })
 
-test('2 MB 按原始字节限制；中文、空文件、超限和无效文本准确分类', async (t) => {
+test('5 MB 按原始字节限制；中文、空文件、超限和无效文本准确分类', async (t) => {
   const full = Buffer.alloc(limit, 'a'),
     over = Buffer.alloc(limit + 1, 'b')
   const f = await fixture(
@@ -224,14 +224,14 @@ test('本地扫描后变化、云端 HEAD/GET 版本变化均不能被当作正�
   assert.match(f.manager.issues(1, id, 0).items[0].message, /云端文件在读取期间发生变化/)
 })
 
-test('云端实际读取超出 2 MB 时记录未比较', async (t) => {
+test('云端实际读取超出 5 MB 时记录未比较', async (t) => {
   const f = await fixture(t, { 'a.txt': 'a' }, { 'a.txt': 'b' })
   f.client.getStream = async (key) => ({
     stream: Readable.from([Buffer.alloc(limit + 1, 'c')]),
     res: { headers: (await f.client.head(key)).res.headers }
   })
   const id = await f.run()
-  assert.match(f.manager.issues(1, id, 0).items[0].message, /2 MB/)
+  assert.match(f.manager.issues(1, id, 0).items[0].message, /5 MB/)
   assert.equal(f.manager.snapshot(1).state.different, 0)
 })
 

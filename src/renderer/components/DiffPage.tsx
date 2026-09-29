@@ -168,7 +168,7 @@ export function DiffPage(): JSX.Element | null {
         >
           <ArrowLeft size={16} />
         </button>
-        <strong className="flex-1 text-xs">文本文件 Diff · 只读 · 两侧各不超过 2 MB</strong>
+        <strong className="flex-1 text-xs">文本文件 Diff · 只读 · 两侧各不超过 5 MB</strong>
         {active ? (
           <button
             className={`titlebar-no-drag ${button}`}

@@ -94,8 +94,19 @@ export interface OssConnectionInfo {
 }
 
 export type SyncDirection = 'download' | 'upload'
+export type SyncDownloadMode = 'merge' | 'original'
+export interface SyncPrecheckSummary {
+  checked: number
+  total: number
+  different: number
+  unavailable: number
+  failed: number
+}
 export type SyncPhase =
   | 'scanning'
+  | 'prechecking'
+  | 'choosing'
+  | 'merging'
   | 'comparing'
   | 'confirming'
   | 'transferring'
@@ -116,17 +127,23 @@ export interface SyncState {
   processed: number
   created: number
   overwritten: number
+  merged: number
+  downloadMode: SyncDownloadMode | null
+  precheck: SyncPrecheckSummary | null
   unchanged: number
   skipped: number
   failed: number
   currentFile: string | null
   issueCount: number
+  issueRevision: number
   message: string | null
 }
 export interface SyncIssue {
+  /** 对象相关记录统一使用 key；清理及任务级问题可使用实际路径。 */
   path: string
+  localPath?: string
   phase: string
-  kind: 'error' | 'skip'
+  kind: 'error' | 'skip' | 'merge' | 'check'
   message: string
   requestId?: string
 }

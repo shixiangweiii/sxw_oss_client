@@ -85,3 +85,18 @@ test('等待确认保持任务活跃，不刷新云端列表、不允许启动�
   s.get().applySyncState(progress(2, 'success'))
   assert.equal(s.refreshes(), 1)
 })
+
+test('同任务检查记录更新后旧响应失效，数量不变也能重读最终结果', async () => {
+  const old = deferred()
+  let response = old.promise
+  const s = store({ getOssSyncIssues: () => response })
+  s.get().applySyncState({ ...progress(1, 'choosing'), issueRevision: 1 })
+  const pending = s.get().loadSyncIssues()
+  s.get().applySyncState({ ...progress(2, 'success'), issueRevision: 2 })
+  response = Promise.resolve({ items: [{ kind: 'merge', message: '待整理' }], total: 1 })
+  await s.get().loadSyncIssues(true)
+  old.resolve({ items: [{ kind: 'check', message: '旧检查记录' }], total: 1 })
+  await pending
+  assert.equal(s.get().syncIssues.length, 1)
+  assert.equal(s.get().syncIssues[0].kind, 'merge')
+})

@@ -33,7 +33,7 @@ export async function runDiffSmoke({
     )
   add('bom.txt', '\ufeffhello\r\n', 'hello\r\n')
   add('eol.txt', 'a\r\nb\r\n', 'a\nb\n')
-  add('long.txt', 'a'.repeat(2 * 1024 * 1024 - 1) + 'x', 'a'.repeat(2 * 1024 * 1024 - 1) + 'y')
+  add('long.txt', 'a'.repeat(5 * 1024 * 1024 - 1) + 'x', 'a'.repeat(5 * 1024 * 1024 - 1) + 'y')
   add(
     'many.txt',
     Array.from({ length: 65000 }, (_, i) => `text-${i}-line\n`).join(''),
@@ -48,7 +48,7 @@ export async function runDiffSmoke({
   )
   add('same.txt', 'same', 'same')
   add('empty.txt', '', '')
-  add('oversized.txt', 'x'.repeat(2 * 1024 * 1024 + 1), 'x')
+  add('oversized.txt', 'x'.repeat(5 * 1024 * 1024 + 1), 'x')
   add('invalid.txt', 'text', Buffer.from([0xff]))
   objects.set('only-cloud.txt', Buffer.from('cloud'))
   configure(objects)
@@ -269,11 +269,14 @@ export async function runDiffSmoke({
   await open('eol.txt')
   assert.match(await text(win), /CRLF/)
   await js(win, 'document.querySelector("button[title=返回差异列表]").click()')
+  console.log('PASS Diff BOM 和换行元信息')
   await open('long.txt')
-  assert.equal(await js(win, 'monaco.editor.getModels()[0].getValueLength()'), 2 * 1024 * 1024)
+  assert.equal(await js(win, 'monaco.editor.getModels()[0].getValueLength()'), 5 * 1024 * 1024)
   await js(win, 'document.querySelector("button[title=返回差异列表]").click()')
+  console.log('PASS Diff 5 MB 长行')
   await open('many.txt')
   await js(win, 'document.querySelector("button[title=返回差异列表]").click()')
+  console.log('PASS Diff 65000 行文本')
   await open('budget.txt')
   await js(win, 'monaco.editor.getDiffEditors()[0].updateOptions({maxComputationTime: 1})')
   await until(
@@ -295,6 +298,7 @@ export async function runDiffSmoke({
     '继续计算完成',
     1000
   )
+  console.log('PASS Diff 计算超时和继续计算')
   const oldBounds = win.getBounds()
   win.setSize(1000, 740)
   win.webContents.send('menu:action', 'view:toggle-theme')
@@ -312,7 +316,7 @@ export async function runDiffSmoke({
     (await win.webContents.capturePage()).toPNG()
   )
   win.setBounds(oldBounds)
-  console.log('PASS BOM、换行、恰好 2 MB 长行、大文本、计算超时与继续计算、主题和窗口尺寸')
+  console.log('PASS BOM、换行、恰好 5 MB 长行、大文本、计算超时与继续计算、主题和窗口尺寸')
   await js(win, 'document.querySelector("button[title=返回差异列表]").click()')
 
   // 打开时重读，已相同的文件必须移出列表。

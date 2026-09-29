@@ -7,6 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
+import { Worker } from 'node:worker_threads'
+import { createPackage } from '@electron/asar'
 import { runDiffSmoke } from './electron-diff-smoke.mjs'
 
 const { app, BrowserWindow, dialog } = electron
@@ -37,8 +39,11 @@ dialog.showMessageBoxSync = (_win, options) => {
 const nativeMessageBox = dialog.showMessageBox.bind(dialog)
 let useNativeConfirmation = false
 let holdConfirmation = false
+let holdModeSelection = false
 const confirmationDialogs = []
 dialog.showMessageBox = (parent, options) => {
+  if (options.buttons?.includes('合并文本到本地') && !holdModeSelection)
+    return Promise.resolve({ response: 2 })
   if (useNativeConfirmation) {
     const box = { parent, options, closed: false }
     confirmationDialogs.push(box)
@@ -163,7 +168,19 @@ async function until(check, label, attempts = 200) {
   }
   throw new Error(`等待超时：${label}`)
 }
-const js = (win, code) => win.webContents.executeJavaScript(code)
+const js = async (win, code) => {
+  let timer
+  try {
+    return await Promise.race([
+      win.webContents.executeJavaScript(code),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`渲染执行超时：${code.slice(0, 180)}`)), 30000)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 const text = (win) => js(win, 'document.body.innerText')
 async function open(win) {
   await until(() => js(win, '!!document.querySelector("button[title=点击在线编辑]")'), '文件列表')
@@ -185,6 +202,42 @@ const timeout = setTimeout(() => {
   console.error('Electron smoke 总超时')
   app.exit(1)
 }, 240000)
+
+async function checkPackedMergeWorker() {
+  const staging = path.join(userData, 'worker-package')
+  await fsp.cp(path.join(root, 'out/main'), path.join(staging, 'out/main'), { recursive: true })
+  await fsp.cp(
+    path.dirname(require.resolve('diff/package.json')),
+    path.join(staging, 'node_modules/diff'),
+    { recursive: true }
+  )
+  const archive = path.join(userData, 'worker-fixture.asar')
+  await createPackage(staging, archive)
+  const worker = new Worker(path.join(archive, 'out/main/textMergeWorker.js'), {
+    workerData: {
+      localBytes: Buffer.from('local\n'),
+      remoteBytes: Buffer.from('cloud\n'),
+      timeout: 5000
+    }
+  })
+  let timer
+  try {
+    const result = await new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('ASAR Worker 等待超时')), 5000)
+      worker.once('message', resolve)
+      worker.once('error', reject)
+      worker.once('exit', (code) => {
+        if (code) reject(new Error(`ASAR Worker 异常退出 ${code}`))
+      })
+    })
+    assert.equal(result.ok, true, result.message)
+    assert.match(Buffer.from(result.value.bytes).toString(), /local\n======= OSS-CLIENT\ncloud/)
+  } finally {
+    clearTimeout(timer)
+    await worker.terminate()
+  }
+  console.log('PASS ASAR 内合并 Worker 入口、共享 chunk 与外置 diff 加载')
+}
 // macOS 全屏切换是异步动画，必须等待事件，而非只读瞬时标志。
 const fullscreenWindows = new Set()
 app.on('browser-window-created', (_event, win) => {
@@ -329,7 +382,10 @@ async function run() {
       second,
       `window.electronAPI.getOssSyncIssues('${cleanupState.taskId}',0)`
     )
-    assert.ok(cleanupIssues.items.every((i) => i.phase === 'cleanup'))
+    assert.ok(cleanupIssues.items.some((i) => i.phase === 'cleanup' && i.kind === 'error'))
+    assert.ok(
+      cleanupIssues.items.filter((i) => i.kind === 'error').every((i) => i.phase === 'cleanup')
+    )
     await until(async () => (await text(second)).includes('部分失败'), '清理错误独立显示')
     failDownloadedCleanup = false
     await clickSync(second, 'download')
@@ -389,30 +445,131 @@ async function run() {
     holdConfirmation = false
     console.log('PASS 覆盖确认 / 多窗口等待 / 关闭后恢复 / 跳过 / 取消 / 确认后实际覆盖')
 
-    if (process.argv.includes('--native-confirmation')) {
-      useNativeConfirmation = true
-      remote = 'native dialog fixture'
-      revision++
-      confirmCount = confirmationDialogs.length
-      const beforeNative = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
-      await clickSync(second, 'download')
-      await until(() => confirmationDialogs.length === confirmCount + 1, '真实原生覆盖弹窗')
-      await pause(600)
-      assert.equal((await syncState(second)).phase, 'confirming')
-      answer = 0
-      app.quit()
-      await until(() => confirmationDialogs.length === confirmCount + 2, '真实原生弹窗收起后恢复')
-      assert.equal(confirmationDialogs.at(-2).closed, true)
-      await pause(600)
-      assert.equal((await syncState(second)).phase, 'confirming')
-      const nativeTask = await syncState(second)
-      await js(first, `window.electronAPI.cancelOssSync('${nativeTask.taskId}')`)
-      assert.equal((await syncFinished(second)).phase, 'cancelled')
-      await until(() => confirmationDialogs.at(-1).closed, '取消信号关闭真实原生弹窗')
-      assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), beforeNative)
-      useNativeConfirmation = false
-      console.log('PASS 真实 macOS 原生弹窗展示 / 退出时收起和恢复 / 取消信号关闭 / 保留目标')
-    }
+    holdModeSelection = true
+    holdConfirmation = true
+    remote = '开头\n云端\n结尾\n'
+    revision++
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), '开头\n本地\n结尾\n')
+    confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '模式选择弹窗')
+    await until(async () => (await text(first)).includes('等待选择同步方式'), '模式选择全窗口状态')
+    assert.equal((await syncState(second)).precheck.different, 1)
+    assert.deepEqual(confirmationDialogs.at(-1).options.buttons, [
+      '取消本次同步',
+      '合并文本到本地',
+      '按原规则同步'
+    ])
+    assert.equal(confirmationDialogs.at(-1).options.defaultId, 0)
+    assert.ok(confirmationDialogs.at(-1).options.detail.includes(path.join(syncLocal, 'a.txt')))
+    const beforeMerge = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
+    answer = 0
+    second.close()
+    await until(() => confirmationDialogs.length === confirmCount + 2, '模式选择收起后恢复')
+    confirmationDialogs.at(-1).respond(0)
+    assert.equal((await syncFinished(second)).phase, 'cancelled')
+    assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), beforeMerge)
+    await js(second, 'document.querySelector("section[aria-label=同步任务] details").open = true')
+    await until(
+      async () => (await text(second)).includes('预检查：两端文本内容不同'),
+      '取消后保留检查详情'
+    )
+    confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '再次选择合并')
+    await js(first, 'document.querySelector("section[aria-label=同步任务] details").open = true')
+    await until(
+      async () => (await text(first)).includes('预检查：两端文本内容不同'),
+      '其他窗口查看检查记录'
+    )
+    confirmationDialogs.at(-1).respond(1)
+    const mergedState = await syncFinished(second)
+    assert.equal(mergedState.merged, 1)
+    assert.equal(mergedState.overwritten, 0)
+    const mergedText = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
+    assert.match(mergedText, /本地\n======= OSS-CLIENT\n云端/)
+    await until(async () => (await text(second)).includes('含待整理文件'), '待整理状态')
+    const mergedIssues = await js(
+      second,
+      `window.electronAPI.getOssSyncIssues('${mergedState.taskId}',0)`
+    )
+    assert.equal(mergedIssues.items[0].kind, 'merge')
+    assert.equal(mergedIssues.items[0].path, 'a.txt')
+    assert.equal(mergedIssues.items[0].localPath, path.join(syncLocal, 'a.txt'))
+    await until(
+      async () => (await text(first)).includes('差异片段待整理'),
+      '同数量记录更新后已展开详情自动刷新'
+    )
+    assert.equal(
+      await js(
+        first,
+        'document.querySelectorAll("section[aria-label=同步任务] details li").length'
+      ),
+      1
+    )
+    holdModeSelection = false
+    holdConfirmation = false
+    const cloudBeforeUpload = remote
+    await clickSync(second, 'upload')
+    assert.equal((await syncFinished(second)).skipped, 1)
+    assert.equal(remote, cloudBeforeUpload)
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), remote)
+    console.log('PASS 文本预检查 / 模式选择恢复与取消 / 双方合并 / 待整理详情 / 上传标记拦截')
+
+    const commonLines = Array.from({ length: 20000 }, (_, i) => `共同-${i}\n`).join('')
+    const addedLines = Array.from({ length: 10000 }, (_, i) => `云端新增-${i}\n`).join('')
+    remote = commonLines + addedLines
+    revision++
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), commonLines)
+    holdModeSelection = true
+    holdConfirmation = true
+    confirmCount = confirmationDialogs.length
+    await clickSync(second, 'download')
+    await until(() => confirmationDialogs.length === confirmCount + 1, '万行追加模式选择')
+    const mergeStart = Date.now()
+    confirmationDialogs.at(-1).respond(1)
+    assert.equal((await syncFinished(second)).merged, 1)
+    assert.ok(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8').includes(addedLines))
+    console.log(`PASS 真实 Electron Worker 合并两万行后的万行追加（${Date.now() - mergeStart} ms）`)
+    holdModeSelection = false
+    holdConfirmation = false
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), remote)
+
+    if (process.argv.includes('--native-confirmation'))
+      for (const nativeModeSelection of [false, true]) {
+        useNativeConfirmation = true
+        holdModeSelection = nativeModeSelection
+        remote = 'native dialog fixture'
+        revision++
+        confirmCount = confirmationDialogs.length
+        const beforeNative = fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8')
+        await clickSync(second, 'download')
+        await until(() => confirmationDialogs.length === confirmCount + 1, '真实原生覆盖弹窗')
+        await pause(600)
+        assert.equal(
+          (await syncState(second)).phase,
+          nativeModeSelection ? 'choosing' : 'confirming'
+        )
+        answer = 0
+        app.quit()
+        await until(() => confirmationDialogs.length === confirmCount + 2, '真实原生弹窗收起后恢复')
+        assert.equal(confirmationDialogs.at(-2).closed, true)
+        await pause(600)
+        assert.equal(
+          (await syncState(second)).phase,
+          nativeModeSelection ? 'choosing' : 'confirming'
+        )
+        const nativeTask = await syncState(second)
+        await js(first, `window.electronAPI.cancelOssSync('${nativeTask.taskId}')`)
+        assert.equal((await syncFinished(second)).phase, 'cancelled')
+        await until(() => confirmationDialogs.at(-1).closed, '取消信号关闭真实原生弹窗')
+        assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), beforeNative)
+        useNativeConfirmation = false
+        holdModeSelection = false
+        console.log(
+          `PASS 真实 macOS ${nativeModeSelection ? '模式选择' : '覆盖确认'}弹窗展示 / 退出时收起和恢复 / 取消信号关闭 / 保留目标`
+        )
+      }
 
     // 在途上传可取消，但必须等待请求结束再关闭；其他窗口的草稿仍需单独确认。
     await draft(first, 'unsaved during sync')
@@ -492,6 +649,34 @@ async function run() {
     await until(async () => (await text(second)).includes('已取消'), '重载恢复终态')
     assert.equal((await syncState(second)).phase, 'cancelled')
     console.log('PASS 取消同步后刷新页面 / 重载恢复状态')
+
+    remote = 'a'.repeat(5 * 1024 * 1024)
+    revision++
+    await open(second)
+    assert.equal(
+      await js(second, 'document.querySelector("textarea").value.length'),
+      5 * 1024 * 1024
+    )
+    await draft(second, 'b' + remote.slice(1))
+    await save(second)
+    await until(() => remote.startsWith('b'), '5 MB 文本保存')
+    await until(async () => (await text(second)).includes('已保存'), '5 MB 保存完成')
+    const savedRevision = revision
+    await draft(second, remote + 'x')
+    await until(async () => (await text(second)).includes('超过 5 MB'), '超限提示')
+    assert.equal(
+      await js(
+        second,
+        '[...document.querySelectorAll("button")].find(b => b.textContent.includes("保存（")).disabled'
+      ),
+      true
+    )
+    assert.equal(revision, savedRevision)
+    answer = 1
+    await js(second, 'document.querySelector("button[title=返回文件列表]").click()')
+    console.log('PASS 在线编辑实际读取/保存恰好 5 MB，超限草稿保留且禁止保存')
+
+    await checkPackedMergeWorker()
 
     await runDiffSmoke({
       win: second,

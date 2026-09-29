@@ -1,9 +1,20 @@
 import type OSS from 'ali-oss'
 import { randomUUID } from 'crypto'
-import { chmod, mkdir, readdir, rename } from 'fs/promises'
-import { dirname, join } from 'path'
+import { chmod, mkdir, readdir, rename, writeFile } from 'fs/promises'
+import { dirname, join, isAbsolute } from 'path'
 import type { BigIntStats } from 'fs'
-import type { SyncDirection, SyncIssue, SyncIssuePage, SyncPhase, SyncState } from '../shared/types'
+import type {
+  SyncDirection,
+  SyncIssue,
+  SyncIssuePage,
+  SyncPhase,
+  SyncState,
+  SyncDownloadMode,
+  SyncPrecheckSummary
+} from '../shared/types'
+import { isTextFileName } from '../shared/path'
+import { DownloadPrecheck, type DownloadCheck } from './syncPrecheck'
+import { fileHasMergeMarkers, mergeText } from './textMerge'
 import { isSyncActive } from '../shared/constants'
 import { reserveSync, notifyContentChanged } from './operations'
 import {
@@ -44,6 +55,16 @@ export type ConfirmOverwrite = (
   request: SyncConfirmation,
   signal: AbortSignal
 ) => Promise<'overwrite' | 'skip' | 'cancel'>
+export type SelectDownloadMode = (
+  request: SyncPrecheckSummary & {
+    taskId: string
+    bucket: string
+    localDir: string
+    examples: string[]
+    diagnosticCount: number
+  },
+  signal: AbortSignal
+) => Promise<SyncDownloadMode | 'cancel'>
 interface Entry {
   key: string
   size: number
@@ -53,7 +74,7 @@ interface Entry {
   scanError?: boolean
   stat?: BigIntStats
 }
-type Outcome = 'created' | 'overwritten' | 'unchanged' | 'skipped'
+type Outcome = 'created' | 'overwritten' | 'merged' | 'unchanged' | 'skipped'
 function errorInfo(err: unknown): { message: string; requestId?: string } {
   const e = err as { message?: string; requestId?: string }
   return { message: e?.message ?? String(err), ...(e?.requestId ? { requestId: e.requestId } : {}) }
@@ -68,13 +89,19 @@ function headInfo(head: OSS.HeadObjectResult): {
   size: number
   etag: string
   modifiedAt: number | null
+  versionId: string | null
 } {
   const h = head.res.headers as Record<string, string>
   const size = Number(h['content-length'])
   if (!Number.isSafeInteger(size) || size < 0 || !h.etag)
     throw new Error('OSS 未返回有效大小或 ETag')
   const modifiedAt = Date.parse(h['last-modified'])
-  return { size, etag: h.etag, modifiedAt: Number.isFinite(modifiedAt) ? modifiedAt : null }
+  return {
+    size,
+    etag: h.etag,
+    versionId: h['x-oss-version-id'] ?? null,
+    modifiedAt: Number.isFinite(modifiedAt) ? modifiedAt : null
+  }
 }
 
 /** 建立路径树，一次性识别大小写、Unicode 别名和文件/目录冲突；冲突传播到子级。 */
@@ -125,6 +152,9 @@ export class SyncManager {
   private recoveryProblems: TempProblem[] = []
   private phase: string = 'scanning'
   private confirmOverwrite!: ConfirmOverwrite
+  private selectDownloadMode!: SelectDownloadMode
+  private precheck: DownloadPrecheck | null = null
+  private precheckIssues = new Map<string, number>()
   constructor(private readonly userData: string) {
     this.temps = new SyncTemps(userData)
   }
@@ -157,7 +187,7 @@ export class SyncManager {
   cancel(taskId: string): void {
     if (!this.active || this.state?.taskId !== taskId) return
     this.controller?.abort()
-    this.change({ phase: 'cancelling', message: '正在取消，等待在途上传结束并清理临时文件…' })
+    this.change({ phase: 'cancelling', message: '正在取消，等待在途请求和计算结束并清理临时文件…' })
   }
   private emit(): void {
     if (this.timer) clearTimeout(this.timer)
@@ -171,7 +201,10 @@ export class SyncManager {
     if (immediate) this.emit()
     else if (!this.timer) this.timer = setTimeout(() => this.emit(), 200)
   }
-  private step(phase: 'scanning' | 'comparing' | 'transferring', file?: string): void {
+  private step(
+    phase: 'scanning' | 'prechecking' | 'choosing' | 'comparing' | 'merging' | 'transferring',
+    file?: string
+  ): void {
     this.phase = phase
     this.change({
       phase: this.controller?.signal.aborted ? 'cancelling' : phase,
@@ -181,7 +214,7 @@ export class SyncManager {
   private issue(
     path: string,
     err: unknown,
-    kind: 'error' | 'skip' = 'error',
+    kind: SyncIssue['kind'] = 'error',
     phase = this.phase
   ): void {
     const info = errorInfo(err)
@@ -192,17 +225,59 @@ export class SyncManager {
       )
     )
       return
-    this.issues.push({ path, phase, kind, ...info })
-    this.change({ issueCount: this.issues.length })
+    let localPath: string | undefined
+    if (path && !isAbsolute(path) && this.state) {
+      try {
+        localPath = join(this.state.localDir, ...validateKey(path))
+      } catch {
+        /* 无效 key 不构造本地路径。 */
+      }
+    }
+    const item = { path, ...(localPath ? { localPath } : {}), phase, kind, ...info }
+    const previous = phase !== 'cleanup' ? this.precheckIssues.get(path) : undefined
+    if (previous !== undefined) this.issues[previous] = item
+    else {
+      if (kind === 'check') this.precheckIssues.set(path, this.issues.length)
+      this.issues.push(item)
+    }
+    this.change({
+      issueCount: this.issues.length,
+      issueRevision: (this.state?.issueRevision ?? 0) + 1
+    })
   }
-  start(direction: SyncDirection, connection: SyncConnection, confirm: ConfirmOverwrite): string {
+  private completePrecheck(key: string, outcome: Outcome | 'failed'): void {
+    const index = this.precheckIssues.get(key)
+    if (index === undefined || this.issues[index].kind !== 'check') return
+    const labels = {
+      created: '已新增',
+      overwritten: '已按原规则覆盖',
+      merged: '已合并，待整理',
+      unchanged: '内容相同',
+      skipped: '已跳过',
+      failed: '失败'
+    }
+    this.issues[index] = {
+      ...this.issues[index],
+      message: `${this.issues[index].message}；执行结果：${labels[outcome]}`
+    }
+    this.change({ issueRevision: this.state!.issueRevision + 1 })
+  }
+  start(
+    direction: SyncDirection,
+    connection: SyncConnection,
+    confirm: ConfirmOverwrite,
+    select: SelectDownloadMode
+  ): string {
     if (direction !== 'download' && direction !== 'upload') throw new Error('无效的同步方向')
     if (typeof confirm !== 'function') throw new Error('缺少同步覆盖确认处理器')
+    if (typeof select !== 'function') throw new Error('缺少下载模式选择处理器')
     const release = reserveSync()
     this.confirmOverwrite = confirm
+    this.selectDownloadMode = select
     this.controller = new AbortController()
     const taskId = randomUUID()
     this.issues = []
+    this.precheckIssues.clear()
     this.state = {
       taskId,
       revision: ++this.revision,
@@ -215,11 +290,15 @@ export class SyncManager {
       processed: 0,
       created: 0,
       overwritten: 0,
+      merged: 0,
+      downloadMode: direction === 'download' ? 'original' : null,
+      precheck: null,
       unchanged: 0,
       skipped: 0,
       failed: 0,
       currentFile: null,
       issueCount: 0,
+      issueRevision: 0,
       message: null
     }
     this.emit()
@@ -323,9 +402,88 @@ export class SyncManager {
         this.issue(problem.path, problem, 'error', 'cleanup')
       this.recoveryProblems = []
       checkCancelled(signal)
-      const root = await prepareRoot(connection.localDir, direction === 'download')
+      let root = await prepareRoot(connection.localDir, false, direction === 'download')
       const cloud = await this.cloudEntries(connection.client, signal, direction === 'download')
       const entries = direction === 'download' ? cloud : await this.localEntries(root, signal)
+      if (direction === 'download') {
+        this.precheck = new DownloadPrecheck(
+          root,
+          await maybeStat(root),
+          connection.client,
+          entries.length
+        )
+        let next = 0,
+          stop = false
+        const worker = async (): Promise<void> => {
+          try {
+            while (!signal.aborted && !stop && next < entries.length) {
+              const entry = entries[next++]
+              this.step('prechecking', entry.key)
+              await this.precheck!.inspect(entry, signal)
+              const record = this.precheck!.checks.get(entry.key)!
+              if (record.kind === 'different')
+                this.issue(entry.key, new Error('预检查：两端文本内容不同'), 'check', 'prechecking')
+              else if (record.problem) {
+                const label =
+                  record.kind === 'failed'
+                    ? '检查失败'
+                    : record.kind === 'unsupported'
+                      ? '无法合并'
+                      : '路径不参与同步'
+                this.issue(
+                  entry.key,
+                  {
+                    ...errorInfo(record.problem),
+                    message: `预检查${label}：${errorInfo(record.problem).message}`
+                  },
+                  'check',
+                  'prechecking'
+                )
+              }
+              this.change({ precheck: { ...this.precheck!.summary } })
+            }
+          } catch (error) {
+            stop = true
+            throw error
+          }
+        }
+        // 任何失败或取消都等三个 worker 收尾，不能遗留读取却释放同步占用。
+        const checks = await Promise.allSettled([worker(), worker(), worker()])
+        const failure = checks.find((result) => result.status === 'rejected')
+        if (failure?.status === 'rejected') throw failure.reason
+        await this.precheck.checkRoot()
+        checkCancelled(signal)
+        const summary = this.precheck.summary
+        if (summary.different || summary.unavailable || summary.failed) {
+          this.step('choosing')
+          this.change({ currentFile: null }, true)
+          const choice = await this.chooseMode(
+            {
+              ...summary,
+              taskId: this.state!.taskId,
+              bucket: connection.bucket,
+              localDir: root,
+              examples: this.issues
+                .filter((item) => item.kind === 'check')
+                .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+                .slice(0, 5)
+                .map((item) => `${item.localPath ?? item.path}：${item.message}`),
+              diagnosticCount: this.precheckIssues.size
+            },
+            signal
+          )
+          checkCancelled(signal)
+          if (choice === 'cancel') {
+            this.cancel(this.state!.taskId)
+            throw new SyncCancelled()
+          }
+          if (choice !== 'merge' && choice !== 'original')
+            throw new Error('无效的同步模式，未写入本地文件')
+          this.change({ downloadMode: choice }, true)
+        }
+        checkCancelled(signal)
+        root = await prepareRoot(connection.localDir, true)
+      }
       const rules = await this.temps.volumeRules(root, (path, err) =>
         this.issue(path, err, 'error', 'cleanup')
       )
@@ -357,8 +515,14 @@ export class SyncManager {
         } catch (err) {
           if (signal.aborted) throw new SyncCancelled()
           outcome = err instanceof SyncSkip ? 'skipped' : 'failed'
-          this.issue(entry.key, err, outcome === 'skipped' ? 'skip' : 'error')
+          this.issue(
+            entry.key,
+            err,
+            outcome === 'skipped' ? 'skip' : 'error',
+            this.precheck?.checks.get(entry.key)?.kind === 'failed' ? 'prechecking' : this.phase
+          )
         }
+        this.completePrecheck(entry.key, outcome)
         const state = this.state!
         this.change({ processed: state.processed + 1, [outcome]: state[outcome] + 1 })
       }
@@ -377,7 +541,9 @@ export class SyncManager {
         }
       }
       const errors = this.issues.some((i) => i.kind === 'error')
-      if (this.state && this.state.created + this.state.overwritten > 0)
+      this.precheck?.clear()
+      this.precheck = null
+      if (this.state && this.state.created + this.state.overwritten + this.state.merged > 0)
         notifyContentChanged(connection.bucket)
       const phase: SyncPhase = signal.aborted
         ? 'cancelled'
@@ -398,6 +564,27 @@ export class SyncManager {
         },
         true
       )
+    }
+  }
+  private async chooseMode(
+    request: Parameters<SelectDownloadMode>[0],
+    signal: AbortSignal
+  ): Promise<SyncDownloadMode | 'cancel'> {
+    let abort = (): void => {}
+    try {
+      return await new Promise((resolve, reject) => {
+        abort = () => reject(new SyncCancelled())
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) return abort()
+        Promise.resolve()
+          .then(() => {
+            checkCancelled(signal)
+            return this.selectDownloadMode(request, signal)
+          })
+          .then(resolve, reject)
+      })
+    } finally {
+      signal.removeEventListener('abort', abort)
     }
   }
   private async cleanupTemp(path: string): Promise<void> {
@@ -485,18 +672,42 @@ export class SyncManager {
     entry: Entry,
     signal: AbortSignal
   ): Promise<Outcome> {
+    const checked = this.precheck?.checks.get(entry.key)
+    if (checked?.kind === 'failed') throw checked.problem
+    if (checked?.kind === 'skip') throw new SyncSkip(errorInfo(checked.problem).message)
+    if (checked) await this.precheck!.assertLocal(entry.key, checked)
+    if (checked?.kind === 'same') {
+      const current = headInfo(await client.head(entry.key, requestOptions()))
+      this.precheck!.assertRemote(checked, current.etag, current.versionId)
+      checkCancelled(signal)
+      await this.precheck!.assertLocal(entry.key, checked)
+      return 'unchanged'
+    }
+    if (this.state!.downloadMode === 'merge' && entry.kind === 'file' && checked?.local?.isFile()) {
+      if (checked.kind === 'unsupported' || checked.kind === 'nontext')
+        throw new SyncSkip(
+          checked.problem
+            ? errorInfo(checked.problem).message
+            : '已有非文本文件不参与合并，已保留本地文件'
+        )
+      if (checked.kind === 'different')
+        return this.mergeDownload(client, root, entry, checked, signal)
+      throw new Error('文件未取得可合并的预检查结果，已保留本地文件')
+    }
     const target = await safePath(root, entry.key, true)
     const before = await maybeStat(target)
     if (entry.kind === 'directory') {
       const info = headInfo(await client.head(entry.key, requestOptions()))
       if (info.size !== 0) throw new Error('目录对象在扫描后发生变化')
       checkCancelled(signal)
+      if (checked) await this.precheck!.assertLocal(entry.key, checked)
       if (before && !before.isDirectory()) throw new SyncSkip('文件与目录同名冲突')
       if (!before) await mkdir(target)
       return before ? 'unchanged' : 'created'
     }
     if (before && !before.isFile()) throw new SyncSkip('文件与目录或特殊文件冲突')
     const info = headInfo(await client.head(entry.key, requestOptions()))
+    if (checked) this.precheck!.assertRemote(checked, info.etag, info.versionId)
     if ((entry.etag && etag(info.etag) !== etag(entry.etag)) || info.size !== entry.size)
       throw new Error('对象在扫描后发生变化，请重新同步')
     if (before && Number(before.size) !== info.size)
@@ -506,9 +717,15 @@ export class SyncManager {
     try {
       const temp = join(dir, 'content')
       this.step('transferring', entry.key)
-      const incoming = await this.remoteHash(client, entry.key, signal, info.etag, temp)
+      const cached = this.precheck?.cache.get(entry.key)
+      let incoming: { hash: string; size: number }
+      if (cached && checked?.remoteHash) {
+        await writeFile(temp, cached.remote.bytes, { flag: 'wx', mode: 0o600 })
+        incoming = { hash: checked.remoteHash, size: cached.remote.bytes.length }
+      } else incoming = await this.remoteHash(client, entry.key, signal, info.etag, temp)
       if (incoming.size !== info.size) throw new Error('下载大小不符，已保留原文件')
       await safePath(root, entry.key)
+      if (checked) await this.precheck!.assertLocal(entry.key, checked)
       if (before && Number(before.size) === incoming.size) {
         const existing = await snapshotFile(target, signal)
         if (!sameFile(before, existing.stat))
@@ -526,12 +743,58 @@ export class SyncManager {
       const now = await maybeStat(target)
       if (before ? !now || !sameFile(before, now) : now !== null)
         throw new Error('本地目标在同步期间变化，已保留当前文件')
+      const finalRemote = headInfo(await client.head(entry.key, requestOptions()))
+      if (
+        finalRemote.etag !== info.etag ||
+        finalRemote.versionId !== info.versionId ||
+        finalRemote.size !== info.size
+      )
+        throw new Error('云端文件在同步期间发生变化，已保留本地文件')
       await safePath(root, entry.key)
+      if (checked) await this.precheck!.assertLocal(entry.key, checked)
       // 只保留已有目标的基本读写执行位，不将临时文件的 0600 强加给已有文件。
       if (before) await chmod(temp, Number(before.mode & 0o777n))
       checkCancelled(signal)
       await rename(temp, target)
       return before ? 'overwritten' : 'created'
+    } finally {
+      await this.cleanupTemp(dir)
+    }
+  }
+  private async mergeDownload(
+    client: OSS,
+    root: string,
+    entry: Entry,
+    checked: DownloadCheck,
+    signal: AbortSignal
+  ): Promise<Outcome> {
+    this.step('merging', entry.key)
+    const verifyRemote = async (): Promise<void> => {
+      const head = headInfo(await client.head(entry.key, requestOptions()))
+      this.precheck!.assertRemote(checked, head.etag, head.versionId)
+      checkCancelled(signal)
+    }
+    await verifyRemote()
+    const pair = await this.precheck!.pair(entry.key, checked, signal)
+    const merged = await mergeText(pair.local.bytes, pair.remote.bytes, signal)
+    if (!merged) throw new SyncSkip('仅 BOM 或换行格式不同，已保留本地格式，未写入文件')
+    const target = await safePath(root, entry.key)
+    const dir = await this.temps.create(dirname(target))
+    try {
+      const temp = join(dir, 'content')
+      await writeFile(temp, merged.bytes, { flag: 'wx', mode: 0o600 })
+      await chmod(temp, Number(checked.local!.mode & 0o777n))
+      await verifyRemote()
+      await this.precheck!.assertLocal(entry.key, checked)
+      checkCancelled(signal)
+      await rename(temp, target)
+      this.issue(
+        entry.key,
+        new Error(`已保留双方内容，${merged.blocks} 个差异片段待整理`),
+        'merge',
+        'merging'
+      )
+      return 'merged'
     } finally {
       await this.cleanupTemp(dir)
     }
@@ -617,6 +880,8 @@ export class SyncManager {
       const temp = join(dir, 'content')
       const snapshot = await snapshotFile(source, signal, temp)
       if (!sameFile(entry.stat, snapshot.stat)) throw new Error('本地来源在建立快照前发生变化')
+      if (isTextFileName(entry.key) && (await fileHasMergeMarkers(temp, signal)))
+        throw new SyncSkip('请先整理本地合并标记，本次未上传')
       let existing: ReturnType<typeof headInfo> | null = null
       try {
         existing = headInfo(await client.head(entry.key, requestOptions()))

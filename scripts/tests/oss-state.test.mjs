@@ -165,10 +165,10 @@ test('UTF-8 超限的多字节草稿不进入 IPC', async () => {
       calls++
     }
   })
-  get().setEditorDraft('中'.repeat(700000))
+  get().setEditorDraft('中'.repeat(1800000))
   await get().saveEditor()
   assert.equal(calls, 0)
-  assert.match(get().editor.error, /2 MB/)
+  assert.match(get().editor.error, /5 MB/)
 })
 
 test('beforeunload 同步检查 dirty 和 saving，取消关闭时阻止卸载', () => {

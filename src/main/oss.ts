@@ -259,7 +259,7 @@ const TEXT_MIME: Record<string, string> = {
 
 function checkTextSize(size: number): void {
   if (!Number.isFinite(size) || size < 0 || size > MAX_TEXT_EDIT_BYTES) {
-    throw new Error('文本过大或大小无效，在线编辑上限 2 MB（按 UTF-8 字节计算）')
+    throw new Error('文本过大或大小无效，在线编辑上限 5 MB（按 UTF-8 字节计算）')
   }
 }
 

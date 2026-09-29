@@ -1,6 +1,7 @@
 /** 文本读取与保存共用的 UTF-8 字节上限。 */
-export const MAX_TEXT_EDIT_BYTES = 2 * 1024 * 1024
-export const MAX_TEXT_DIFF_BYTES = 2 * 1024 * 1024
+export const MAX_TEXT_BYTES = 5 * 1024 * 1024
+export const MAX_TEXT_EDIT_BYTES = MAX_TEXT_BYTES
+export const MAX_TEXT_DIFF_BYTES = MAX_TEXT_BYTES
 export const DIFF_PAGE_SIZE = 100
 
 export function isDiffActive(phase: string | undefined): boolean {
@@ -52,6 +53,9 @@ export const IPC_CHANNELS = {
 export function isSyncActive(phase: string | undefined): boolean {
   return (
     phase === 'scanning' ||
+    phase === 'prechecking' ||
+    phase === 'choosing' ||
+    phase === 'merging' ||
     phase === 'comparing' ||
     phase === 'confirming' ||
     phase === 'transferring' ||

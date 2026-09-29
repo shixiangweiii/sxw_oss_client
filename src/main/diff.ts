@@ -273,7 +273,7 @@ export class DiffManager {
               pair.size > MAX_TEXT_DIFF_BYTES ||
               Number(pair.local.stat.size) > MAX_TEXT_DIFF_BYTES
             )
-              throw new Error('文件超过 2 MB，未比较（两侧各自按字节限制）')
+              throw new Error('文件超过 5 MB，未比较（两侧各自按字节限制）')
             const result = await readDiffPair(
               root,
               connection.client,
