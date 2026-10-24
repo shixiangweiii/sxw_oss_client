@@ -39,15 +39,16 @@ function service() {
         reads++
         return env !== null
       },
-      readFileSync: () => env
+      readFileSync: () => env,
+      lstatSync: () => ({ isDirectory: () => true, isSymbolicLink: () => false })
     }
   })
   const api = load('src/main/oss.ts')
   return {
     api,
     clients,
-    config(value = 'one') {
-      env = `oss_ak=mock-${value}\noss_sk=mock\noss_bucket=${value}`
+    config(value = 'one', extra = '') {
+      env = `oss_ak=mock-${value}\noss_sk=mock\noss_bucket=${value}\n${extra}`
     },
     get reads() {
       return reads
@@ -67,6 +68,24 @@ function service() {
     }
   }
 }
+
+test('sync_ignore 随窗口配置刷新并传入任务，空配置没有隐式排除项', () => {
+  const s = service()
+  s.config('one', 'sync_dir_local=/fixture\nsync_ignore=" .git, .idea, *.log, , .git "')
+  s.api.getDefaultBucket(1)
+  s.api.getDefaultBucket(2)
+  const first = s.api.getSyncConnection(1)
+  assert.deepEqual(Array.from(first.ignorePatterns), ['.git', '.idea', '*.log'])
+  s.config('one', 'sync_dir_local=/fixture\nsync_ignore=')
+  s.api.getDefaultBucket(1)
+  assert.deepEqual(Array.from(s.api.getSyncConnection(1).ignorePatterns), [])
+  assert.deepEqual(Array.from(s.api.getSyncConnection(2).ignorePatterns), [
+    '.git',
+    '.idea',
+    '*.log'
+  ])
+  assert.deepEqual(Array.from(first.ignorePatterns), ['.git', '.idea', '*.log'])
+})
 
 test('缺失配置可重试；重载只替换当前窗口的客户端与配置', () => {
   const s = service()

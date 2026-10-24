@@ -5,6 +5,7 @@ import { join, isAbsolute, resolve, parse, relative, sep } from 'path'
 import { lstatSync } from 'fs'
 import { assertSyncIdle, notifyContentChanged, withTextWrite } from './operations'
 import { MAX_TEXT_EDIT_BYTES } from '../shared/constants'
+import { parseSyncIgnore } from './syncIgnore'
 import type {
   OssBucketSummary,
   OssErrorInfo,
@@ -31,6 +32,7 @@ interface OssEnvConfig {
   region?: string
   bucket?: string
   syncDirLocal?: string
+  syncIgnore?: string
 }
 
 /** 最小 .env 解析：KEY=VALUE 逐行，支持 # 注释与成对引号。不引 dotenv 依赖，够用就好 */
@@ -69,7 +71,8 @@ function loadEnvConfig(): OssEnvConfig | null {
           endpoint: vars.oss_endpoint || undefined,
           region: vars.oss_region || undefined,
           bucket: vars.oss_bucket || undefined,
-          syncDirLocal: vars.sync_dir_local || undefined
+          syncDirLocal: vars.sync_dir_local || undefined,
+          syncIgnore: vars.sync_ignore
         }
       }
     }
@@ -130,6 +133,7 @@ export function getSyncConnection(owner: number): {
   client: OSS
   bucket: string
   localDir: string
+  ignorePatterns: string[]
 } {
   const info = getConnectionInfo(owner)
   const config = connections.get(owner)?.config
@@ -139,7 +143,8 @@ export function getSyncConnection(owner: number): {
   return {
     client: new OSS({ ...config, secure: true, timeout: 120000 }),
     bucket: info.defaultBucket,
-    localDir: resolve(info.syncDirLocal)
+    localDir: resolve(info.syncDirLocal),
+    ignorePatterns: parseSyncIgnore(config.syncIgnore)
   }
 }
 

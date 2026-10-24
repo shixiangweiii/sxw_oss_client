@@ -29,6 +29,7 @@ process.on('exit', () => {
 })
 let configBucket = 'fixture'
 let configuredLocal = syncLocal
+let configuredIgnore = ''
 let failDownloadedCleanup = false
 let answer = 0
 const dialogs = []
@@ -65,6 +66,7 @@ dialog.showMessageBox = (parent, options) => {
 }
 let revision = 0
 let remote = 'initial'
+let remoteModifiedAt = 'Wed, 01 Jan 2020 00:00:00 GMT'
 let saveGate = null
 const writes = []
 let diffObjects = null
@@ -82,7 +84,7 @@ const diffHeaders = (key) => {
 const headers = () => ({
   etag: `"${revision}"`,
   'content-length': String(Buffer.byteLength(remote)),
-  'last-modified': 'Wed, 01 Jan 2020 00:00:00 GMT'
+  'last-modified': remoteModifiedAt
 })
 class FixtureOSS {
   constructor(options) {
@@ -155,7 +157,7 @@ Module._load = function (name, ...args) {
       existsSync: (p) => path.basename(String(p)) === '.env' || fs.existsSync(p),
       readFileSync: (p, ...rest) =>
         path.basename(String(p)) === '.env'
-          ? `oss_ak=fixture\noss_sk=fixture\noss_bucket=${configBucket}\nsync_dir_local=${configuredLocal}`
+          ? `oss_ak=fixture\noss_sk=fixture\noss_bucket=${configBucket}\nsync_dir_local=${configuredLocal}\nsync_ignore=${configuredIgnore}`
           : fs.readFileSync(p, ...rest)
     }
   return originalLoad.call(this, name, ...args)
@@ -182,6 +184,30 @@ const js = async (win, code) => {
   }
 }
 const text = (win) => js(win, 'document.body.innerText')
+async function captureUploadPreview(win, output) {
+  win.show()
+  win.focus()
+  if (windowed) {
+    win.unmaximize()
+    win.setSize(960, 720)
+    await until(() => win.getSize()[0] === 960 && win.getSize()[1] === 720, '预览小窗口尺寸')
+  }
+  await js(
+    win,
+    'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(null))))'
+  )
+  const layout = await js(
+    win,
+    `(() => {
+    const rect = document.querySelector('dialog[open]').getBoundingClientRect();
+    const list = document.querySelector('[aria-label="上传候选列表"]').getBoundingClientRect();
+    return { width: rect.width, top: rect.top, bottom: rect.bottom, right: rect.right, height: innerHeight, viewportWidth: innerWidth, listHeight: list.height };
+  })()`
+  )
+  assert.ok(layout.width > 300 && layout.top >= 0 && layout.bottom <= layout.height + 1)
+  assert.ok(layout.right <= layout.viewportWidth + 1 && layout.listHeight > 0)
+  fs.writeFileSync(output, (await win.webContents.capturePage()).toPNG())
+}
 async function open(win) {
   await until(() => js(win, '!!document.querySelector("button[title=点击在线编辑]")'), '文件列表')
   await js(win, 'document.querySelector("button[title=点击在线编辑]").click()')
@@ -332,7 +358,7 @@ async function run() {
     assert.equal(writes.at(-1).bucket, 'fixture')
     console.log('PASS 配置重载按窗口隔离')
 
-    const clickSync = async (win, direction) => {
+    const clickSync = async (win, direction, confirmUpload = true) => {
       const label = direction === 'upload' ? '同步到云端' : '同步到本地'
       await until(
         () =>
@@ -352,6 +378,13 @@ async function run() {
           (await js(win, 'window.electronAPI.getOssSyncState()'))?.taskId !== previous?.taskId,
         '新同步任务启动'
       )
+      if (direction === 'upload' && confirmUpload) {
+        await until(() => js(win, '!!document.querySelector("dialog[open]")'), '上传范围预览')
+        await js(
+          win,
+          `[...document.querySelectorAll('dialog button')].find(b => b.textContent === '确认同步到云端').click()`
+        )
+      }
     }
     const syncState = (win) => js(win, 'window.electronAPI.getOssSyncState()')
     const syncFinished = async (win) => {
@@ -393,16 +426,194 @@ async function run() {
     assert.equal(fs.readFileSync(path.join(syncLocal, 'a.txt'), 'utf8'), remote)
     console.log('PASS 覆盖保留权限 / 清理失败计数准确 / 下次同步恢复清理')
 
+    // 上传范围：真实页面分页、默认取消焦点、Esc、配置过滤及确认前零写入。
+    configuredIgnore = '.git,.gitignore,.DS_Store,.idea,*.log,docs/private/**,build/'
+    const ignoredFiles = [
+      '.git/config',
+      '.gitignore',
+      '.DS_Store',
+      'project/.idea/settings.xml',
+      'project/debug.log',
+      'docs/private/secret.txt',
+      'build/output.txt'
+    ]
+    for (const key of ignoredFiles) {
+      fs.mkdirSync(path.dirname(path.join(syncLocal, key)), { recursive: true })
+      fs.writeFileSync(path.join(syncLocal, key), 'ignored fixture')
+    }
+    fs.mkdirSync(path.join(syncLocal, 'preview-empty'))
+    fs.mkdirSync(path.join(syncLocal, 'preview'))
+    fs.mkdirSync(path.join(syncLocal, '.github'))
+    fs.writeFileSync(path.join(syncLocal, '.github/workflow.yml'), 'keep')
+    for (let i = 0; i < 105; i++)
+      fs.writeFileSync(
+        path.join(syncLocal, `preview/file-${String(i).padStart(3, '0')}.txt`),
+        `candidate ${i}`
+      )
+    await js(second, 'document.querySelector("button[aria-label=刷新]").click()')
+    await until(
+      () => js(second, '!!document.querySelector("button[title=点击在线编辑]")'),
+      '刷新排除配置'
+    )
+    const previewWrites = writes.length
+    await clickSync(second, 'upload', false)
+    await until(() => js(second, '!!document.querySelector("dialog[open]")'), '完整上传范围预览')
+    const previewTask = await syncState(second)
+    const previewPage = await js(
+      second,
+      `window.electronAPI.getOssUploadPreview('${previewTask.taskId}', 0)`
+    )
+    assert.equal(previewPage.ok, true)
+    assert.equal(previewPage.data.fileCount, 107)
+    assert.equal(previewPage.data.directoryCount, 1)
+    assert.equal(previewPage.data.total, 108)
+    assert.equal(previewPage.data.items.length, 100)
+    assert.equal(
+      previewPage.data.totalBytes,
+      fs.statSync(path.join(syncLocal, 'a.txt')).size +
+        4 +
+        Array.from({ length: 105 }, (_, i) => Buffer.byteLength(`candidate ${i}`)).reduce(
+          (a, b) => a + b,
+          0
+        )
+    )
+    assert.equal(await js(second, 'document.activeElement.textContent'), '取消')
+    assert.equal(
+      (await js(first, `window.electronAPI.getOssUploadPreview('${previewTask.taskId}', 0)`)).data,
+      null
+    )
+    assert.equal(
+      (await js(first, `window.electronAPI.confirmOssUpload('${previewTask.taskId}', 'normal')`))
+        .ok,
+      false
+    )
+    assert.equal(await js(first, '!!document.querySelector("dialog[open]")'), false)
+    assert.equal((await js(first, 'window.electronAPI.startOssDiff()')).ok, false)
+    await until(async () => (await text(first)).includes('等待确认上传范围'), '其他窗口预览忙态')
+    assert.equal(writes.length, previewWrites)
+    if (process.env.OSS_UPLOAD_PREVIEW_SCREENSHOT)
+      await captureUploadPreview(second, process.env.OSS_UPLOAD_PREVIEW_SCREENSHOT)
+    await js(
+      second,
+      `[...document.querySelectorAll('dialog button')].find(b=>b.textContent==='下一页').click()`
+    )
+    await until(
+      () => js(second, 'document.querySelector("dialog").innerText.includes("第 2 / 2 页")'),
+      '预览最后一页'
+    )
+    assert.equal(await js(second, 'document.querySelectorAll("dialog tbody tr").length'), 8)
+    assert.ok((await text(second)).includes('preview/file-104.txt'))
+    await js(
+      second,
+      `[...document.querySelectorAll('dialog button')].find(b=>b.textContent==='上一页').click()`
+    )
+    await until(
+      () => js(second, 'document.querySelectorAll("dialog tbody tr").length===100'),
+      '返回预览第一页'
+    )
+    assert.ok((await text(second)).includes('.github/workflow.yml'))
+    for (const key of ignoredFiles) assert.equal((await text(second)).includes(key), false)
+    answer = 0
+    second.close()
+    assert.equal(second.isDestroyed(), false)
+    assert.equal((await syncState(second)).phase, 'previewing')
+    await js(second, 'document.querySelector("button[aria-label=关闭上传预览]").click()')
+    assert.equal((await syncFinished(second)).phase, 'cancelled')
+    await until(() => js(second, '!document.querySelector("dialog[open]")'), '关闭预览后释放模态')
+    assert.equal(writes.length, previewWrites)
+
+    await clickSync(second, 'upload', false)
+    await until(() => js(second, '!!document.querySelector("dialog[open]")'), 'Esc 前预览')
+    second.show()
+    second.focus()
+    second.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'ESC' })
+    second.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'ESC' })
+    assert.equal((await syncFinished(second)).phase, 'cancelled')
+    await until(() => js(second, '!document.querySelector("dialog[open]")'), 'Esc 关闭预览')
+    assert.equal(writes.length, previewWrites)
+
+    // 使用真实主题按钮检查暗色样式，再通过预览取消按钮退出。
+    await js(second, 'document.querySelector("button[title=切换为深色外观]")?.click()')
+    await clickSync(second, 'upload', false)
+    await until(() => js(second, '!!document.querySelector("dialog[open]")'), '取消按钮前预览')
+    if (process.env.OSS_UPLOAD_PREVIEW_DARK_SCREENSHOT)
+      await captureUploadPreview(second, process.env.OSS_UPLOAD_PREVIEW_DARK_SCREENSHOT)
+    await js(
+      second,
+      `[...document.querySelectorAll('dialog button')].find(b=>b.textContent==='取消').click()`
+    )
+    assert.equal((await syncFinished(second)).phase, 'cancelled')
+    await until(() => js(second, '!document.querySelector("dialog[open]")'), '取消按钮关闭预览')
+    await js(second, 'document.querySelector("button[title=切换为浅色外观]")?.click()')
+    assert.equal(writes.length, previewWrites)
+
+    configuredIgnore = '*'
+    await js(second, 'document.querySelector("button[aria-label=刷新]").click()')
+    await clickSync(second, 'upload', false)
+    assert.equal((await syncFinished(second)).phase, 'success')
+    await until(async () => (await text(second)).includes('没有可同步的文件'), '空候选直接提示')
+    assert.equal(await js(second, '!!document.querySelector("dialog[open]")'), false)
+    assert.equal(writes.length, previewWrites)
+    configuredIgnore = '.git,.gitignore,.DS_Store,.idea,*.log,docs/private/**,build/'
+    await js(second, 'document.querySelector("button[aria-label=刷新]").click()')
+    for (const entry of ['preview', 'preview-empty', '.github'])
+      fs.rmSync(path.join(syncLocal, entry), { recursive: true })
+    console.log(
+      'PASS 上传过滤 / 108 项完整分页 / 默认取消焦点 / 关闭按钮 / 真实 Esc / 取消按钮 / 空候选 / 确认前零写入 / 多窗口绑定'
+    )
+
     fs.writeFileSync(path.join(syncLocal, 'a.txt'), 'upload from local fixture')
     await clickSync(second, 'upload')
     await until(() => remote === 'upload from local fixture', '上传按钮写入')
     assert.equal((await syncFinished(second)).phase, 'success')
-    console.log('PASS 上传按钮 / 本地快照上传 / 完成后列表刷新')
+    assert.deepEqual(
+      writes.slice(previewWrites).map((item) => item.key),
+      ['a.txt']
+    )
+    for (const entry of ['.git', '.gitignore', '.DS_Store', 'project', 'docs', 'build'])
+      fs.rmSync(path.join(syncLocal, entry), { recursive: true })
+    console.log('PASS 上传确认后写入 / 忽略项无写入 / 本地快照上传 / 完成后列表刷新')
     if (process.env.OSS_SMOKE_SCREENSHOT)
       fs.writeFileSync(
         process.env.OSS_SMOKE_SCREENSHOT,
         (await second.webContents.capturePage()).toPNG()
       )
+
+    // 一键同步模式一次性授权本轮覆盖较新云端，仍走原有传输流程。
+    remoteModifiedAt = 'Mon, 01 Jan 2035 00:00:00 GMT'
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), 'one click local content')
+    holdConfirmation = true
+    const beforeOneClick = confirmationDialogs.length
+    await clickSync(second, 'upload', false)
+    await until(() => js(second, '!!document.querySelector("dialog[open]")'), '一键同步前预览')
+    assert.ok((await text(second)).includes('包括覆盖较新的云端文件'))
+    await js(
+      second,
+      `[...document.querySelectorAll('dialog button')].find(b=>b.textContent==='一键同步全部').click()`
+    )
+    const oneClickState = await syncFinished(second)
+    assert.equal(oneClickState.phase, 'success')
+    assert.equal(oneClickState.uploadMode, 'overwrite-all')
+    assert.equal(confirmationDialogs.length, beforeOneClick)
+    assert.equal(remote, 'one click local content')
+    // 下一任务普通确认恢复逐文件覆盖询问，模式不持久化。
+    fs.writeFileSync(path.join(syncLocal, 'a.txt'), 'normal local content')
+    await clickSync(second, 'upload')
+    await until(() => confirmationDialogs.length === beforeOneClick + 1, '普通上传仍逐文件确认')
+    assert.equal((await syncState(second)).uploadMode, 'normal')
+    confirmationDialogs.at(-1).respond(0)
+    assert.equal((await syncFinished(second)).skipped, 1)
+    assert.equal(remote, 'one click local content')
+    remoteModifiedAt = 'Wed, 01 Jan 2020 00:00:00 GMT'
+    holdConfirmation = false
+    console.log('PASS 一键同步覆盖较新云端且无逐文件确认 / 下一任务普通模式仍询问')
+
+    if (process.argv.includes('--upload-preview-only')) {
+      assert.equal(unhandledErrors.length, 0)
+      clearTimeout(timeout)
+      app.exit(0)
+      return
+    }
 
     // 真实 IPC/窗口与可控原生弹窗替身：等待、跳过、恢复及取消。
     holdConfirmation = true

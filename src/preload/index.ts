@@ -39,6 +39,10 @@ const electronAPI: ElectronAPI = {
     }
   },
   startOssSync: (direction) => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_START, direction),
+  getOssUploadPreview: (taskId, offset) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_UPLOAD_PREVIEW, taskId, offset),
+  confirmOssUpload: (taskId, decision) =>
+    ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_CONFIRM_UPLOAD, taskId, decision),
   cancelOssSync: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_CANCEL, taskId),
   getOssSyncState: () => ipcRenderer.invoke(IPC_CHANNELS.OSS_SYNC_GET_STATE),
   getOssSyncIssues: (taskId, offset) =>

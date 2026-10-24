@@ -95,6 +95,7 @@ export interface OssConnectionInfo {
 
 export type SyncDirection = 'download' | 'upload'
 export type SyncDownloadMode = 'merge' | 'original'
+export type UploadDecision = 'cancel' | 'normal' | 'overwrite-all'
 export interface SyncPrecheckSummary {
   checked: number
   total: number
@@ -104,6 +105,7 @@ export interface SyncPrecheckSummary {
 }
 export type SyncPhase =
   | 'scanning'
+  | 'previewing'
   | 'prechecking'
   | 'choosing'
   | 'merging'
@@ -129,6 +131,7 @@ export interface SyncState {
   overwritten: number
   merged: number
   downloadMode: SyncDownloadMode | null
+  uploadMode: Exclude<UploadDecision, 'cancel'> | null
   precheck: SyncPrecheckSummary | null
   unchanged: number
   skipped: number
@@ -150,6 +153,26 @@ export interface SyncIssue {
 export interface SyncIssuePage {
   items: SyncIssue[]
   total: number
+}
+
+export interface UploadPreviewItem {
+  key: string
+  size: number
+  kind: 'file' | 'directory'
+}
+/** 候选范围不代表实际上传数量；相同内容仍在执行时跳过。 */
+export interface UploadPreview {
+  taskId: string
+  bucket: string
+  localDir: string
+  fileCount: number
+  directoryCount: number
+  totalBytes: number
+  items: UploadPreviewItem[]
+}
+export interface UploadPreviewPage extends UploadPreview {
+  total: number
+  offset: number
 }
 
 /** 内容版本来自实际读取响应，不能从列表推测。 */
@@ -267,6 +290,11 @@ export interface ElectronAPI {
   cancelOssDiffRead: (taskId: string, requestId: string) => Promise<OssResult<null>>
   endOssDiff: (taskId: string) => Promise<OssResult<null>>
   startOssSync: (direction: SyncDirection) => Promise<OssResult<{ taskId: string }>>
+  getOssUploadPreview: (
+    taskId: string,
+    offset: number
+  ) => Promise<OssResult<UploadPreviewPage | null>>
+  confirmOssUpload: (taskId: string, decision: UploadDecision) => Promise<OssResult<null>>
   cancelOssSync: (taskId: string) => Promise<OssResult<null>>
   getOssSyncState: () => Promise<SyncState | null>
   getOssSyncIssues: (taskId: string, offset: number) => Promise<SyncIssuePage>

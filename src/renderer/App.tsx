@@ -4,6 +4,7 @@ import { Toolbar } from './components/Toolbar'
 import { OssPanel } from './components/OssPanel'
 import { TextEditorPage } from './components/TextEditorPage'
 import { SyncPanel } from './components/SyncPanel'
+import { UploadPreview } from './components/UploadPreview'
 import { DiffPage } from './components/DiffPage'
 import { useMenuAction } from './hooks/useMenuAction'
 
@@ -133,6 +134,7 @@ function App(): JSX.Element {
         <DiffPage />
       </div>
       <SyncPanel />
+      <UploadPreview />
 
       <Toast />
     </div>

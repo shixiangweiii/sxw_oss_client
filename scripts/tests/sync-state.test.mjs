@@ -78,7 +78,7 @@ test('等待确认保持任务活跃，不刷新云端列表、不允许启动�
       starts++
     }
   })
-  s.get().applySyncState(progress(1, 'confirming'))
+  s.get().applySyncState(progress(1, 'previewing'))
   await s.get().startSync('upload')
   assert.equal(starts, 0)
   assert.equal(s.refreshes(), 0)

@@ -12,6 +12,7 @@ async function until(check) {
 }
 
 async function runtime(modeSelection = false) {
+  const previewMode = modeSelection === 'upload-preview'
   const handlers = new Map(),
     events = new Map(),
     boxes = [],
@@ -90,13 +91,13 @@ async function runtime(modeSelection = false) {
     getIssues() {
       return { items: [], total: 0 }
     }
-    start(direction, _connection, confirm, selectMode) {
+    start(direction, _connection, confirm, selectMode, confirmUpload) {
       assert.equal(this.active, false)
       this.active = true
       this.signal = new AbortController()
       this.state = {
         taskId: 'task',
-        phase: modeSelection ? 'choosing' : 'confirming',
+        phase: previewMode ? 'previewing' : modeSelection ? 'choosing' : 'confirming',
         issueCount: 0
       }
       this.finished = Promise.resolve().then(async () => {
@@ -105,7 +106,7 @@ async function runtime(modeSelection = false) {
         )
         this.answer = await Promise.race([
           cancelled,
-          (modeSelection ? selectMode : confirm)(
+          (previewMode ? confirmUpload : modeSelection ? selectMode : confirm)(
             {
               taskId: 'task',
               direction,
@@ -115,6 +116,14 @@ async function runtime(modeSelection = false) {
               localModifiedAt: 1704067200000,
               remoteModifiedAt: 1704067210000,
               localDir: '/test',
+              fileCount: 105,
+              directoryCount: 0,
+              totalBytes: 105,
+              items: Array.from({ length: 105 }, (_, i) => ({
+                key: `file-${i}.txt`,
+                size: 1,
+                kind: 'file'
+              })),
               checked: 5,
               total: 5,
               different: 2,
@@ -185,6 +194,10 @@ async function runtime(modeSelection = false) {
     exitAnswer: (value) => {
       exitAnswer = value
     },
+    preview: (win = first, taskId = 'task', offset = 0) =>
+      handlers.get('oss:sync-upload-preview')({ sender: win.webContents }, taskId, offset),
+    decide: (accepted, win = first, taskId = 'task') =>
+      handlers.get('oss:sync-confirm-upload')({ sender: win.webContents }, taskId, accepted),
     start: () => handlers.get('oss:sync-start')({ sender: first.webContents }, 'upload'),
     cancel: () => handlers.get('oss:sync-cancel')({}, 'task'),
     reload: () => {
@@ -304,3 +317,72 @@ for (const [response, result] of [
     assert.equal(f.manager.answer, result)
   })
 }
+
+for (const accepted of ['cancel', 'normal', 'overwrite-all'])
+  test(`上传预览 IPC 完整分页及窗口绑定，${accepted}只接受一次`, async () => {
+    const f = await runtime('upload-preview')
+    assert.equal(f.start().ok, true)
+    await until(() => f.preview().data !== null)
+    const first = f.preview()
+    assert.equal(first.ok, true)
+    assert.equal(first.data.items.length, 100)
+    assert.equal(first.data.total, 105)
+    assert.equal(first.data.totalBytes, 105)
+    assert.equal(first.data.fileCount, 105)
+    assert.equal(f.preview(f.first, 'task', 100).data.items.length, 5)
+    assert.equal(f.preview(f.first, 'task', 100).data.items[4].key, 'file-104.txt')
+    assert.equal(f.preview(f.first, 'task', -1).data.offset, 0)
+    assert.equal(f.preview(f.second).data, null)
+    assert.equal(f.preview(f.first, 'old-task').data, null)
+    assert.equal(f.decide('normal', f.second).ok, false)
+    assert.equal(f.decide('normal', f.first, 'old-task').ok, false)
+    assert.equal(f.decide('true').ok, false)
+    assert.equal(f.start().ok, false)
+    assert.equal(f.decide(accepted).ok, true)
+    assert.equal(f.decide(accepted).ok, false)
+    assert.equal(f.preview().data, null)
+    await f.manager.wait()
+    assert.equal(f.manager.answer, accepted)
+    assert.equal(f.first.listenerCount('closed'), 0)
+  })
+
+for (const operation of ['close', 'quit', 'reload'])
+  test(`等待上传预览时 ${operation}：继续保留预览，取消后结束等待再执行操作`, async () => {
+    const f = await runtime('upload-preview')
+    f.start()
+    await until(() => f.preview().data !== null)
+    const act = () => {
+      if (operation === 'close') f.first.close()
+      else if (operation === 'quit') f.app.quit()
+      else assert.equal(f.reload(), false)
+    }
+    act()
+    await tick()
+    assert.equal(f.manager.active, true)
+    assert.equal(f.preview().data.total, 105)
+    assert.equal(f.first.destroyed, false)
+    f.exitAnswer(1)
+    act()
+    await f.manager.wait()
+    await until(() =>
+      operation === 'close'
+        ? f.first.destroyed
+        : operation === 'quit'
+          ? f.exits() === 1
+          : f.first.reloads === 1
+    )
+    assert.equal(f.manager.state.phase, 'cancelled')
+    assert.equal(f.preview().data, null)
+  })
+
+for (const operation of ['cancel', 'destroy'])
+  test(`等待上传预览时 ${operation} 释放等待及预览`, async () => {
+    const f = await runtime('upload-preview')
+    f.start()
+    await until(() => f.preview().data !== null)
+    if (operation === 'cancel') f.cancel()
+    else f.first.destroy()
+    await f.manager.wait()
+    assert.equal(f.manager.state.phase, 'cancelled')
+    assert.equal(f.preview().data, null)
+  })

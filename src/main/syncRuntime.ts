@@ -1,13 +1,45 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import { IPC_CHANNELS } from '../shared/constants'
-import type { OssResult, SyncDirection } from '../shared/types'
+import { IPC_CHANNELS, UPLOAD_PREVIEW_PAGE_SIZE } from '../shared/constants'
+import type {
+  OssResult,
+  SyncDirection,
+  UploadPreview,
+  UploadPreviewPage,
+  UploadDecision
+} from '../shared/types'
 import { getSyncConnection, toOssError } from './oss'
-import { SyncManager, type ConfirmOverwrite, type SelectDownloadMode } from './sync'
+import {
+  SyncManager,
+  type ConfirmOverwrite,
+  type SelectDownloadMode,
+  type ConfirmUpload
+} from './sync'
 
 let manager: SyncManager
 let pendingExit = false
 let exitDecision: { promise: Promise<void>; resume: () => void } | null = null
 let activeConfirmation: { controller: AbortController; closed: Promise<void> } | null = null
+let pendingUpload: {
+  owner: number
+  preview: UploadPreview
+  respond: (decision: UploadDecision) => void
+} | null = null
+
+function uploadConfirmationFor(win: BrowserWindow): ConfirmUpload {
+  return (preview, signal) =>
+    new Promise((resolve) => {
+      const respond = (decision: UploadDecision): void => {
+        signal.removeEventListener('abort', abort)
+        if (pendingUpload === request) pendingUpload = null
+        resolve(decision)
+      }
+      const abort = (): void => respond('cancel')
+      const request = { owner: win.webContents.id, preview, respond }
+      pendingUpload = request
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted || win.isDestroyed()) abort()
+    })
+}
 
 async function confirmDialog<T extends string>(
   win: BrowserWindow,
@@ -243,7 +275,8 @@ export async function initializeSync(): Promise<void> {
           direction,
           getSyncConnection(event.sender.id),
           confirmationFor(win),
-          modeSelectionFor(win)
+          modeSelectionFor(win),
+          uploadConfirmationFor(win)
         )
         const onClosed = (): void => manager.cancel(taskId)
         win.once('closed', onClosed)
@@ -261,6 +294,42 @@ export async function initializeSync(): Promise<void> {
     manager.cancel(taskId)
     return { ok: true, data: null }
   })
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_SYNC_UPLOAD_PREVIEW,
+    (event, taskId: string, offset: number): OssResult<UploadPreviewPage | null> => {
+      const request = pendingUpload
+      if (!request || request.owner !== event.sender.id || request.preview.taskId !== taskId)
+        return { ok: true, data: null }
+      const start = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0
+      const { items, ...summary } = request.preview
+      return {
+        ok: true,
+        data: {
+          ...summary,
+          offset: start,
+          total: items.length,
+          items: items.slice(start, start + UPLOAD_PREVIEW_PAGE_SIZE)
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    IPC_CHANNELS.OSS_SYNC_CONFIRM_UPLOAD,
+    (event, taskId: string, decision: UploadDecision): OssResult<null> => {
+      try {
+        if (pendingExit) throw new Error('请先处理关闭、退出或刷新确认')
+        const request = pendingUpload
+        if (!request || request.owner !== event.sender.id || request.preview.taskId !== taskId)
+          throw new Error('上传预览已结束或不属于当前窗口')
+        if (decision !== 'cancel' && decision !== 'normal' && decision !== 'overwrite-all')
+          throw new Error('无效的上传确认选择')
+        request.respond(decision)
+        return { ok: true, data: null }
+      } catch (error) {
+        return { ok: false, error: toOssError(error) }
+      }
+    }
+  )
   ipcMain.handle(IPC_CHANNELS.OSS_SYNC_GET_STATE, () => manager.getState())
   ipcMain.handle(IPC_CHANNELS.OSS_SYNC_ISSUES, (_event, taskId: string, offset: number) =>
     manager.getIssues(taskId, offset)

@@ -5,6 +5,7 @@ import type { SyncPhase } from '../../shared/types'
 
 const labels: Record<SyncPhase, string> = {
   scanning: '扫描中',
+  previewing: '等待确认上传范围',
   prechecking: '检查本地文本差异',
   choosing: '等待选择同步方式',
   merging: '合并文本中',
@@ -19,6 +20,7 @@ const labels: Record<SyncPhase, string> = {
 }
 const issueStages: Record<string, string> = {
   scanning: '扫描',
+  previewing: '上传范围确认',
   prechecking: '预检查',
   choosing: '模式选择',
   merging: '文本合并',
@@ -109,6 +111,9 @@ export function SyncPanel(): JSX.Element | null {
             </p>
           )}
           {state.message && <p className="mt-1">{state.message}</p>}
+          {state.uploadMode === 'overwrite-all' && (
+            <p className="mt-1">本次已确认覆盖较新的云端文件，不再逐文件询问。</p>
+          )}
           {state.issueCount > 0 && (
             <details
               ref={detailsRef}

@@ -10,10 +10,14 @@ import type {
   SyncPhase,
   SyncState,
   SyncDownloadMode,
-  SyncPrecheckSummary
+  SyncPrecheckSummary,
+  UploadPreview,
+  UploadPreviewItem,
+  UploadDecision
 } from '../shared/types'
 import { isTextFileName } from '../shared/path'
 import { DownloadPrecheck, type DownloadCheck } from './syncPrecheck'
+import { SyncIgnore } from './syncIgnore'
 import { fileHasMergeMarkers, mergeText } from './textMerge'
 import { isSyncActive } from '../shared/constants'
 import { reserveSync, notifyContentChanged } from './operations'
@@ -41,7 +45,9 @@ export interface SyncConnection {
   client: OSS
   bucket: string
   localDir: string
+  ignorePatterns?: string[]
 }
+export type ConfirmUpload = (preview: UploadPreview, signal: AbortSignal) => Promise<UploadDecision>
 export interface SyncConfirmation {
   taskId: string
   direction: SyncDirection
@@ -153,6 +159,7 @@ export class SyncManager {
   private phase: string = 'scanning'
   private confirmOverwrite!: ConfirmOverwrite
   private selectDownloadMode!: SelectDownloadMode
+  private confirmUpload!: ConfirmUpload
   private precheck: DownloadPrecheck | null = null
   private precheckIssues = new Map<string, number>()
   constructor(private readonly userData: string) {
@@ -266,14 +273,18 @@ export class SyncManager {
     direction: SyncDirection,
     connection: SyncConnection,
     confirm: ConfirmOverwrite,
-    select: SelectDownloadMode
+    select: SelectDownloadMode,
+    confirmUpload?: ConfirmUpload
   ): string {
     if (direction !== 'download' && direction !== 'upload') throw new Error('无效的同步方向')
     if (typeof confirm !== 'function') throw new Error('缺少同步覆盖确认处理器')
     if (typeof select !== 'function') throw new Error('缺少下载模式选择处理器')
+    if (direction === 'upload' && typeof confirmUpload !== 'function')
+      throw new Error('缺少上传范围确认处理器')
     const release = reserveSync()
     this.confirmOverwrite = confirm
     this.selectDownloadMode = select
+    this.confirmUpload = confirmUpload!
     this.controller = new AbortController()
     const taskId = randomUUID()
     this.issues = []
@@ -292,6 +303,7 @@ export class SyncManager {
       overwritten: 0,
       merged: 0,
       downloadMode: direction === 'download' ? 'original' : null,
+      uploadMode: null,
       precheck: null,
       unchanged: 0,
       skipped: 0,
@@ -338,8 +350,13 @@ export class SyncManager {
     } while (token)
     return entries
   }
-  private async localEntries(root: string, signal: AbortSignal): Promise<Entry[]> {
+  private async localEntries(
+    root: string,
+    signal: AbortSignal,
+    patterns: readonly string[] = []
+  ): Promise<Entry[]> {
     const entries: Entry[] = []
+    const ignore = new SyncIgnore(patterns)
     const visit = async (prefix: string): Promise<void> => {
       checkCancelled(signal)
       const path = prefix ? await safePath(root, prefix) : root
@@ -352,9 +369,12 @@ export class SyncManager {
         checkCancelled(signal)
         const key = prefix ? prefix + '/' + name : name
         try {
+          // 名称规则在 stat 前即可排除；目录规则待类型明确后剪枝。
+          if (ignore.matches(key, false)) continue
           validateKey(key)
           const child = await maybeStat(join(path, name))
           if (!child) throw new Error('扫描期间文件被删除')
+          if (ignore.matches(key, child.isDirectory() && !child.isSymbolicLink())) continue
           if (
             this.temps.protects(join(path, name)) ||
             (child.isDirectory() && isSyncTempDirectory(name))
@@ -404,7 +424,10 @@ export class SyncManager {
       checkCancelled(signal)
       let root = await prepareRoot(connection.localDir, false, direction === 'download')
       const cloud = await this.cloudEntries(connection.client, signal, direction === 'download')
-      const entries = direction === 'download' ? cloud : await this.localEntries(root, signal)
+      const entries =
+        direction === 'download'
+          ? cloud
+          : await this.localEntries(root, signal, connection.ignorePatterns)
       if (direction === 'download') {
         this.precheck = new DownloadPrecheck(
           root,
@@ -490,6 +513,36 @@ export class SyncManager {
       const invalid = conflicts(direction === 'download' ? entries : [...cloud, ...entries], rules)
       entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
       this.change({ total: entries.length, discovered: entries.length })
+      if (direction === 'upload') {
+        const items: UploadPreviewItem[] = []
+        for (const entry of entries)
+          if (entry.kind !== 'skip' && !entry.scanError && !invalid.has(entry.key))
+            items.push({ key: entry.key, size: entry.size, kind: entry.kind })
+        if (items.length) {
+          this.phase = 'previewing'
+          this.change({ phase: 'previewing', currentFile: null }, true)
+          const accepted = await this.waitForUpload(
+            {
+              taskId: this.state!.taskId,
+              bucket: connection.bucket,
+              localDir: root,
+              fileCount: items.filter((item) => item.kind === 'file').length,
+              directoryCount: items.filter((item) => item.kind === 'directory').length,
+              totalBytes: items.reduce((sum, item) => sum + item.size, 0),
+              items
+            },
+            signal
+          )
+          checkCancelled(signal)
+          if (accepted === 'cancel') {
+            this.cancel(this.state!.taskId)
+            throw new SyncCancelled()
+          }
+          if (accepted !== 'normal' && accepted !== 'overwrite-all')
+            throw new Error('无效的上传确认选择，未写入云端')
+          this.change({ uploadMode: accepted })
+        } else this.change({ message: '没有可同步的文件；如有扫描问题，请查看处理详情' })
+      }
       for (const entry of entries) {
         checkCancelled(signal)
         this.step('comparing', entry.key)
@@ -587,6 +640,28 @@ export class SyncManager {
       signal.removeEventListener('abort', abort)
     }
   }
+  private async waitForUpload(
+    preview: UploadPreview,
+    signal: AbortSignal
+  ): Promise<UploadDecision> {
+    let abort = (): void => {}
+    const confirm = this.confirmUpload
+    try {
+      return await new Promise((resolve, reject) => {
+        abort = () => reject(new SyncCancelled())
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) return abort()
+        Promise.resolve()
+          .then(() => {
+            checkCancelled(signal)
+            return confirm(preview, signal)
+          })
+          .then(resolve, reject)
+      })
+    } finally {
+      signal.removeEventListener('abort', abort)
+    }
+  }
   private async cleanupTemp(path: string): Promise<void> {
     try {
       await this.temps.remove(path)
@@ -602,6 +677,7 @@ export class SyncManager {
     signal: AbortSignal
   ): Promise<void> {
     checkCancelled(signal)
+    if (this.state?.direction === 'upload' && this.state.uploadMode === 'overwrite-all') return
     if (remoteModifiedAt === null || !Number.isFinite(localModifiedAt))
       throw new Error('无法获取有效的文件修改时间，已保留目标文件')
     const state = this.state!

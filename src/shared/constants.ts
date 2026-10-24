@@ -3,6 +3,7 @@ export const MAX_TEXT_BYTES = 5 * 1024 * 1024
 export const MAX_TEXT_EDIT_BYTES = MAX_TEXT_BYTES
 export const MAX_TEXT_DIFF_BYTES = MAX_TEXT_BYTES
 export const DIFF_PAGE_SIZE = 100
+export const UPLOAD_PREVIEW_PAGE_SIZE = 100
 
 export function isDiffActive(phase: string | undefined): boolean {
   return phase === 'scanning' || phase === 'comparing' || phase === 'cancelling'
@@ -23,6 +24,8 @@ export const IPC_CHANNELS = {
   OSS_DIFF_CANCEL_READ: 'oss:diff-cancel-read',
   OSS_DIFF_END: 'oss:diff-end',
   OSS_SYNC_START: 'oss:sync-start',
+  OSS_SYNC_UPLOAD_PREVIEW: 'oss:sync-upload-preview',
+  OSS_SYNC_CONFIRM_UPLOAD: 'oss:sync-confirm-upload',
   OSS_SYNC_CANCEL: 'oss:sync-cancel',
   OSS_SYNC_STATE: 'oss:sync-state',
   OSS_SYNC_GET_STATE: 'oss:sync-get-state',
@@ -53,6 +56,7 @@ export const IPC_CHANNELS = {
 export function isSyncActive(phase: string | undefined): boolean {
   return (
     phase === 'scanning' ||
+    phase === 'previewing' ||
     phase === 'prechecking' ||
     phase === 'choosing' ||
     phase === 'merging' ||
